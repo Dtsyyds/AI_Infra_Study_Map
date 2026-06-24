@@ -1,5 +1,6 @@
 # include <vector>
 # include <algorithm>
+# include <iostream>
 
 using namespace std;
 
@@ -101,5 +102,57 @@ class Solution_PRO{
         {
             return num[total / 2];
         }
+    }
+};
+
+class Solution_Plus {
+public:
+    double findMedianSortedArrays(vector<int>& nums1, vector<int>& nums2) {
+        if(nums1.size() > nums2.size())
+        {
+            return findMedianSortedArrays(nums2, nums1);
+        }
+
+        int m = nums1.size();
+        int n = nums2.size();
+
+        int left = 0, right = m;
+
+        int total = m + n;
+        int leftSize = (total + 1) / 2;
+
+        while(left <= right)
+        {
+            int i = (left + right) / 2;
+            int j = leftSize - i;
+
+            long long Aleft = (i == 0) ? LLONG_MIN : nums1[i - 1];
+            long long Aright = (i == m) ? LLONG_MAX : nums1[i];
+
+            long long Bleft = (j == 0) ? LLONG_MIN : nums2[j - 1];
+            long long Bright = (j == n) ? LLONG_MAX : nums2[j];
+
+            if(Aleft <= Bright && Bleft <= Aright)
+            {
+                if(total % 2 == 1)
+                {
+                    return max(Aleft, Bleft);
+                }
+                else
+                {
+                    return (max(Aleft, Bleft) + min(Aright, Bright)) / 2.0;
+                }
+            }
+            else if(Aleft > Bright)
+            {
+                right = i - 1;
+            }
+            else
+            {
+                left = i + 1;
+            }
+        }
+        return 0.0;
+
     }
 };
