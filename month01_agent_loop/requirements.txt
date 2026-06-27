@@ -1,0 +1,4 @@
+simpleeval
+python-dotenv
+requests
+openai
