@@ -54,4 +54,4 @@ class Solution_Pro {
             }
             return prefix;
         }
-}
+};
