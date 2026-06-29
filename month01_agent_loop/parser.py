@@ -14,7 +14,6 @@ parser.py
 
 """
 import re
-from tools import *
 
 cal_text = f"Action: calculator(expression=\"1 + 2 * 4\")"
 read_text = f"Action: read_file(path=\"./README.md\")"
@@ -78,7 +77,7 @@ def parse_Finish(input: str) -> str:
         "args": args_text,
     }
 
-def parse_action(input: str) -> str:
+def parse_action(input: str) -> dict:
     if not input.startswith("Action:"):
         return f"Action判断不是有效的调用工具指令"
     # 去掉前面的 action
