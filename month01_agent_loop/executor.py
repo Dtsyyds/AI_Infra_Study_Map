@@ -19,6 +19,18 @@ write_text = f"Action: write_file(path=\"./test.txt\", content=\"hello world!\")
 finish_text = f"Action: Finish[任务完成]"
 
 def execute_action(action_text: str) -> dict:
+    """
+    执行一条 Action 指令
+
+    Args:
+        action_text (str): 指令输入文本
+    Return:
+        dict: 执行结果
+        {
+            "type": "observation" | "error" | "Finish",
+            "content": "最终答案" | "错误信息" | None
+        }
+    """
     action = parse_action(action_text)
 
     if action["type"] == "error":
