@@ -25,7 +25,11 @@ def calculator(expression: str) -> str:
     Returns:
         计算结果字符串
     """
-    return str(simple_eval(expression))
+    try:
+        result = eval(expression)
+        return result
+    except Exception as e:
+        return f"计算失败{e}"
 
 def read_file(path: str) -> str:
     """
@@ -35,8 +39,11 @@ def read_file(path: str) -> str:
     Returns:
         文件内容字符串
     """
-    with open(path, "r", encoding="utf-8") as f:
-        return str(f.read())
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return str(f.read())
+    except Exception as e:
+        return f"读取失败{e}"
     
 def write_file(path: str, content: str) -> str:
     """
@@ -47,8 +54,12 @@ def write_file(path: str, content: str) -> str:
     Returns:
         写入结果字符串
     """
-    with open(path, "w") as f:
-        return str(f.write(content))
+    try:
+        with open(path, "w") as f:
+            f.write(content)
+        return f"写入成功{path}" 
+    except Exception as e:
+        return f"写入失败{e}"
     
 TOOLS: Dict[str, Callable] = {
     "calculator": calculator,
@@ -95,4 +106,10 @@ if __name__ ==  "__main__":
 
     print("\n测试工具:write_file")
     print(run_tool("write_file", path="./test.txt", content="hello world!"))
+
+    print("\n测试不存在的工具:")
+    print(run_tool("unknown_tool", value="test"))
+
+    print("\n测试参数错误")
+    print(run_tool("calculator", "1 + 2 * 3"))
     
