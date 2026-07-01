@@ -20,6 +20,9 @@ V0 版本 Agent
 
 from memory import Memory
 from executor import execute_action
+from memory import Memory
+from prompts import build_prompt
+from llm import *
 
 class RuleBaseAgent:
     """
@@ -141,9 +144,99 @@ class RuleBaseAgent:
         """
         self.memory.clear()
 
+class LLMAgent:
+    """
+    V1 FakerLLM Agent
+    
+    这个版本不再由 agent.py 直接生成 Thought / Action, 而是通过 prompts.py 构建 prompt ，再调用 LLM 来生成 Thought / Action
+    """
+
+    def __init__(self, max_steps: int = 3):
+        self.memory = Memory(max_messages=50)
+        self.max_steps = max_steps
+
+    def run(self, user_input: str) -> str:
+        """
+        执行一次 Agent 流程
+        """
+
+        # 1. 记录用户输入
+        self.memory.add_user_message(user_input)
+        # 2. 从 memory 中获取历史上下文
+        memory_content = self.memory.get_content()
+        # 3. 构建 prompt
+        prompt = build_prompt(user_input, memory_content)
+        print("\n[Prompt]")
+        print(prompt)
+
+        # 4. 调用 LLM 生成 Thought / Action
+        llm_output = call_llm(prompt)
+        print("\n[LLM Output]")
+        print(llm_output)
+
+        # 5. 记录 LLM 输出
+        self.memory.add_ai_message(llm_output)
+
+        # 6. 从 LLM 中解析 Action
+        action = self._extract_action_line(llm_output)
+
+        # 7. 执行 Action
+        result = execute_action(action)
+
+        print(result)
+
+        # 8. 根据执行的结果返回最终答案
+        if result["type"] == "observation":
+            observation = result["content"]
+            self.memory.add_observation(observation)
+            final_answer = f"执行完成，工具返回结果：{observation}"
+            self.memory.add_ai_message(f"Final Answer: {final_answer}")
+            return final_answer
+        
+        if result["type"] == "Finish":
+            final_answer = result["content"]
+            self.memory.add_ai_message(f"Final Answer: {final_answer}")
+            return final_answer
+        if result["type"] == "error":
+            error_msg = result["content"]
+            self.memory.add_observation(f"Error: {error_msg}")
+            final_answer = f"执行失败，错误原因：{error_msg}"
+            self.memory.add_ai_message(f"Final Answer: {final_answer}")
+            return final_answer
+        
+        final_answer = "未知错误"
+        self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        return final_answer
+    
+    def _extract_action_line(self, llm_output: str) -> str:
+        """
+        从 LLM 输出中提取 Action 行
+        
+        LLM 输出格式：
+
+        Thought: 用户需要计算的数学表达式
+        Action: calculator(expression="1 + 2 * 4")
+
+        executor.py 只需要 Action 行
+        """
+
+        for line in llm_output.splitlines():
+            line = line.strip()
+
+            if line.startswith("Action:"):
+                return line
+            
+        return "Action: Finish[LLM 输出中没有 Action 行]"
+    
+    def show_memory(self) -> str:
+        return self.memory.get_content()
+    
+    def clear_memory(self) -> None:
+        self.memory.clear()
 
 if __name__ == "__main__":
-    agent = RuleBaseAgent(max_steps=3)
+    # agent = RuleBaseAgent(max_steps=3)
+    agent = LLMAgent(max_steps=3)
 
     test_cases = [
         "计算 1 + 2 * 4",

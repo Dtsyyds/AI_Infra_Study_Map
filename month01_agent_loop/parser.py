@@ -85,17 +85,20 @@ def parse_action(input: str) -> dict:
 
     # 情况1 Finish
     finish_match = re.search(r"Finish\[(.*)\]", action_text)
-    print(finish_match)
+    # print(finish_match)
     if finish_match:
         return {
-            "type": "Finish",
-            "args": finish_match.group(1)
+            "type": "finish",
+            "content": finish_match.group(1).strip()
         }
     
     # 情况2 其他工具
     tool_match = re.search(r"(\w+)\((.*)\)", action_text)
     if not tool_match:
-        return f"不是有效的调用工具指令"
+        return {
+            "type": "error",
+            "content": "不是有效的工具调用指令"
+        }
     tool_name = tool_match.group(1)
     args_text = tool_match.group(2)
 

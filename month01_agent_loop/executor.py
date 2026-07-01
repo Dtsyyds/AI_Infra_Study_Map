@@ -1,62 +1,69 @@
 """
-这个文件负责联立 parser.py 和 tools.py
+executor.py
+
+这个文件负责连接 parser.py 和 tools.py。
 
 流程：
-
 1. 接收一条 Action 指令
 2. 使用 parse_action 解析
-3. 调用对应的执行工具
-4. 如果是 Finish 就返回最终答案
-
+3. 如果是工具调用，就执行对应工具
+4. 如果是 Finish，就返回最终答案
+5. 如果解析失败，就返回错误信息
 """
 
 from parser import parse_action
-from tools import *
+from tools import run_tool
 
-cal_text = f"Action: calculator(expression=\"1 + 2 * 4\")"
-read_text = f"Action: read_file(path=\"./README.md\")"
-write_text = f"Action: write_file(path=\"./test.txt\", content=\"hello world!\")"
-finish_text = f"Action: Finish[任务完成]"
 
 def execute_action(action_text: str) -> dict:
     """
-    执行一条 Action 指令
+    执行一条 Action 指令。
 
     Args:
-        action_text (str): 指令输入文本
-    Return:
-        dict: 执行结果
+        action_text: 例如：
+            Action: calculator(expression="1 + 2 * 4")
+            Action: read_file(path="./test.txt")
+            Action: write_file(path="./test.txt", content="hello world")
+            Action: Finish[任务完成]
+
+    Returns:
         {
-            "type": "observation" | "error" | "Finish",
-            "content": "最终答案" | "错误信息" | None
+            "type": "observation" | "finish" | "error",
+            "content": "工具返回结果 / 最终答案 / 错误信息"
         }
     """
+
     action = parse_action(action_text)
 
     if action["type"] == "error":
         return {
             "type": "error",
-            "content": action["message"]
+            "content": action["content"]
         }
-    if action.get("type") == "Finish":
+
+    if action["type"] == "finish":
         return {
-            "type":"Finish",
-            "content": "最终答案"
+            "type": "finish",
+            "content": action["content"]
         }
-    else:
+
+    if action["type"] == "tool":
         tool_name = action["tool_name"]
         args = action["args"]
+
         observation = run_tool(tool_name, **args)
-        
+
         return {
             "type": "observation",
             "content": observation
         }
+
     return {
         "type": "error",
-        "content": "未知错误"
+        "content": f"未知解析类型: {action['type']}"
     }
-    
+
+
 if __name__ == "__main__":
     test_cases = [
         'Action: calculator(expression="1 + 2 * 4")',

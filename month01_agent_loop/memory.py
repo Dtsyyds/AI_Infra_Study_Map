@@ -38,7 +38,7 @@ class Memory:
             del self.messages[0]
         message = {"role": role, "content": content}
         self.messages.append(message)
-        print(f"{role}: {content}添加成功")
+        print(f"{role}: {content}")
         return self.messages[-1]
 
     def add_user_message(self, content: str) -> dict:
@@ -60,7 +60,7 @@ class Memory:
         """ 获取原始消息列表 """
         return self.messages
     
-    def get_context(self) -> str:
+    def get_content(self) -> str:
         """
         将消息列表转换成适合放进 Prompt 的上下文字符串
         """
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     print("原始消息列表")
     print(memory.get_message())
     print("\n上下文字符串")
-    print(memory.get_context())
+    print(memory.get_content())
     print("清空记忆")
     memory.clear()
     print(memory.get_message())
