@@ -38,3 +38,14 @@ checkpoints/
 # Results
 *.csv
 *.xlsx
+
+# C/C++ build outputs
+/hash_test
+*.out
+*.o
+leetcode/**/solution
+
+# local test files
+/test.txt
+/test.text
+month01_agent_loop/test.txt
