@@ -114,7 +114,7 @@ class RuleBaseAgent:
 
                 return final_answer
             
-            if result["type"] == "Finish":
+            if result["type"] == "finish":
                 final_answer = result["content"]
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
 
@@ -193,7 +193,7 @@ class LLMAgent:
             self.memory.add_ai_message(f"Final Answer: {final_answer}")
             return final_answer
         
-        if result["type"] == "Finish":
+        if result["type"] == "finish":
             final_answer = result["content"]
             self.memory.add_ai_message(f"Final Answer: {final_answer}")
             return final_answer
