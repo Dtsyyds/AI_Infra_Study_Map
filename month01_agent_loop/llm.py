@@ -8,8 +8,13 @@ llm.py
 - 根据用户输入模拟大模型的输出生成  Thought / Action 格式的输出
 - 用来测试 Agent Loop 的整体链路
 """
-
+import os
 import re
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
 
 class FakerLLM:
 
@@ -126,21 +131,123 @@ class FakerLLM:
         
         return user_input.replace("计算", "", 1).strip()
     
+class OpenAICompatibleLLM:
+    """
+    真实 OpenAI-compatible LLM 调用
+
+    当前支持从 .env 读取：
+
+    Agent AI 风格：
+    - Agent_AI_API_KEY
+    - Agent_BASE_URL
+    - Agent_MODEL_NAME
+
+    同时兼容 OpenAI 风格：
+    - OPENAI_API_KEY
+    - OPENAI_BASE_URL
+    - MODEL_NAME
+    """
+
+    def __init__(self):
+        api_key = (
+            os.getenv("Agent_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        )
+
+        base_url = (
+            os.getenv("Agent_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+        )
+
+        model_name = (
+            os.getenv("Agent_AI_MODEL_NAME") or os.getenv("MODEL_NAME")
+        )
+
+        if not api_key:
+            raise ValueError("Missing API key")
+
+        if not base_url:
+            raise ValueError("Missing Base URL")
+
+        if not model_name:
+            raise ValueError("Missing Model Name")
+
+        self.model_name = model_name
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+    def generate(self, prompt: str) -> str:
+        """
+        调用真实的 LLM, 返回 Thought / Action 格式的输出
+        """
+        completion = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[{
+                "role": "system",
+                "content":(
+
+                    "你是一个严格的 Agent 动作生成器"
+                    "你只能输出 Thought / Action 两行"
+                    "不要输出 Markdown"
+                    "不要输出代码块"
+                    "不要输出额外解释"
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+            ],
+            temperature=0,
+        )
+        content = completion.choices[0].message.content
+        if content is None:
+            return "Thought: 模型没有返回内容\nAction: Finish[模型没有返回内容]"
+        return self._clean_output(content)
+    
+    def _clean_output(self, text: str) -> str:
+        """
+        清理模型可能输出的 Markdown 代码块
+        """
+
+        text = text.strip()
+
+        if text.startswith("```"):
+            lines = text.split("\n")
+            code_lines = []
+            for line in lines:
+                if line.startswith("```"):
+                    break
+                elif line.startswith("#"):
+                    continue
+                else:
+                    code_lines.append(line)
+            return "\n".join(code_lines)
+        else:
+            return text
+        
 def call_llm(prompt: str) -> str:
     """
     统一的 LLM 调用接口
     
-    现在使用 FakerLLM
-    后续只需要修改这里即可替换为其他 LLM 实现
+    LLM_MODE=fake 使用 FakerLLM
+    LLM_MODE=real 使用真实 API
+    
     """
 
-    llm = FakerLLM()
+    # llm = FakerLLM()
+    mode = os.getenv("LLM_MODE", "fake").lower()
+
+    if mode == "real":
+        llm = OpenAICompatibleLLM()
+    else:
+        llm = FakerLLM()
 
     return llm.generate(prompt)
 
 if __name__ == "__main__":
     from prompts import build_prompt
-    print("测试 FakerLLM")
+    # print("测试 FakerLLM")
 
     test_cases = [
         "帮我计算 1 + 2 * 4 的结果",
