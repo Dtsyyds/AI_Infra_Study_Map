@@ -48,6 +48,8 @@ Finish[最终回答]
 - 不要输出任何其他内容
 - 不要使用不存在的工具
 
+- 如果历史记忆中已经有 observation, 说明工具已经执行完成，你应该根据 observation 输出 Finish[最终答案]
+
 """
 
 def build_prompt(user_input: str, memory_content: str) -> str:

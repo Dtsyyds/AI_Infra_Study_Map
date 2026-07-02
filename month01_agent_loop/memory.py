@@ -38,7 +38,27 @@ class Memory:
             del self.messages[0]
         message = {"role": role, "content": content}
         self.messages.append(message)
-        print(f"{role}: {content}")
+        # print(f"{role}: {content}")
+        self._trim_messages()   # 用来裁剪对话历史/消息列表 的，主要目的是控制总 token 数，防止超过模型的最大上下文窗口
+        """
+        一般在 LangChain 这类框架的 ChatPromptTemplate 或消息管理类里，它会做这样几件事：
+
+        计算当前所有消息的总长度（token 数）
+
+        如果超过限制（如模型上限或自定义 max_tokens），就按策略删减消息
+
+        保留重要的部分，比如：
+
+        最旧的系统消息（SystemMessage）一般不删
+
+        尽量保留最近几轮对话（因为更相关）
+
+        从较早的用户/助手消息对开始丢弃
+
+        可能还支持按消息类型、保留条数、保留策略等配置
+
+        最终效果就是：在发送给 LLM 前，自动把过长的历史截短，避免报 context length 错误，同时尽量保留关键上下文。
+        """
         return self.messages[-1]
 
     def add_user_message(self, content: str) -> dict:
@@ -84,6 +104,13 @@ class Memory:
 
     def clear(self):
         self.messages.clear()
+
+    def _trim_messages(self):
+        """
+        裁剪消息列表，使其总长度不超过 max_messages
+        """
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages:]
 
 if __name__ == "__main__":
     memory = Memory(max_messages=10)

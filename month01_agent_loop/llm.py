@@ -19,6 +19,14 @@ class FakerLLM:
         """
         user_input = self._extract_user_input(prompt)
         print(f"FakerLLM 收到用户输入: {user_input}")
+
+        last_observation = self._extract_last_observation(prompt)
+        if last_observation:
+            return (
+                "Thought: 我已经拿到了工具返回的观察结果，可以基于它给出最终答案\n"
+                f'Action: Finish[{last_observation}]'
+            )
+        
         if self._is_calculate_task(user_input):
             expression = self._extract_expression(user_input)
 
@@ -67,6 +75,27 @@ class FakerLLM:
         if match:
             return match.group(1)
         return ""
+    
+    def _extract_last_observation(self, prompt: str) -> str:
+        """
+        从完整 Prompt 中提取最后一次的 observation
+        
+        memory_content 中可能包含多次 observation, 这里只取最后一次
+        正常返回 observation: 9
+
+        Args:
+            prompt: 完整的 prompt 字符串
+        Returns:
+            最后一次的 observation
+        """
+        matches = re.findall(r"observation:\s*(.*)", prompt)
+        if not matches:
+            matches = re.findall(r"Observation:\s*(.*)", prompt)
+        if matches:
+            return matches[-1].strip()
+        else:
+            return ""
+            
     
     def _is_calculate_task(self, user_input: str) -> bool:
         """

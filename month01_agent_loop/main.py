@@ -4,12 +4,23 @@ main.py
 V0 规则版 Agent 的命令行入口
 
 """
-from agent import RuleBaseAgent
+from agent import RuleBaseAgent, LLMAgent
 
 def main():
-    agent = RuleBaseAgent()
+    # agent = RuleBaseAgent()
 
-    print("V0 规则版 Agent Loop")
+    # print("V0 规则版 Agent Loop")
+    # print("当前支持：")
+    # print("1. 计算 1 + 2 * 4")
+    # print("2. 写入 ./test.txt hello world")
+    # print("3. 读取 ./test.txt")
+    # print("输入 exit / quit 退出")
+    # print("输入 memory 查看记忆")
+    # print("输入 clear 清空记忆")
+
+    agent = LLMAgent()
+
+    print("V1 FakerLLM React Agent Loop")
     print("当前支持：")
     print("1. 计算 1 + 2 * 4")
     print("2. 写入 ./test.txt hello world")
@@ -17,6 +28,7 @@ def main():
     print("输入 exit / quit 退出")
     print("输入 memory 查看记忆")
     print("输入 clear 清空记忆")
+
 
     while True:
         user_input = input("\nuser: ").strip()

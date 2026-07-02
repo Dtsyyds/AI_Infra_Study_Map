@@ -157,56 +157,101 @@ class LLMAgent:
 
     def run(self, user_input: str) -> str:
         """
-        执行一次 Agent 流程
+        执行最大次数下的 Agent 流程
         """
 
+        # 当前任务专用 scratchpad
+        task_memory = Memory(max_messages=20)
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
-        # 2. 从 memory 中获取历史上下文
-        memory_content = self.memory.get_content()
-        # 3. 构建 prompt
-        prompt = build_prompt(user_input, memory_content)
-        print("\n[Prompt]")
-        print(prompt)
 
-        # 4. 调用 LLM 生成 Thought / Action
-        llm_output = call_llm(prompt)
-        print("\n[LLM Output]")
-        print(llm_output)
+        for step in range(self.max_steps):
+            print(f"======== step: {step} ======")
+            # memory_content = self.memory.get_content()
+            memory_content = task_memory.get_content()
+            prompt = build_prompt(user_input, memory_content)
+            
+            llm_output = call_llm(prompt)
 
-        # 5. 记录 LLM 输出
-        self.memory.add_ai_message(llm_output)
+            task_memory.add_ai_message(llm_output)
+            self.memory.add_ai_message(llm_output)
 
-        # 6. 从 LLM 中解析 Action
-        action = self._extract_action_line(llm_output)
+            action =  self._extract_action_line(llm_output)
 
-        # 7. 执行 Action
-        result = execute_action(action)
+            result = execute_action(action)
 
-        print(result)
+            if result["type"] == "observation":
+                observation = result["content"]
+                task_memory.add_observation(observation)
+                self.memory.add_observation(observation)
 
-        # 8. 根据执行的结果返回最终答案
-        if result["type"] == "observation":
-            observation = result["content"]
-            self.memory.add_observation(observation)
-            final_answer = f"执行完成，工具返回结果：{observation}"
-            self.memory.add_ai_message(f"Final Answer: {final_answer}")
-            return final_answer
+                continue
+
+            if result["type"] == "finish":
+                final_answer = result["content"]
+                task_memory.add_ai_message(f"Final Answer: {final_answer}")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                return final_answer
+            
+            if result["type"] == "error":
+                error_msg = result["content"]
+                task_memory.add_observation(f"Error: {error_msg}")
+                self.memory.add_observation(f"Error: {error_msg}")
+                final_answer = f"执行失败，错误原因：{error_msg}"
+                task_memory.add_ai_message(f"Final Answer: {final_answer}")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                return final_answer
         
-        if result["type"] == "finish":
-            final_answer = result["content"]
-            self.memory.add_ai_message(f"Final Answer: {final_answer}")
-            return final_answer
-        if result["type"] == "error":
-            error_msg = result["content"]
-            self.memory.add_observation(f"Error: {error_msg}")
-            final_answer = f"执行失败，错误原因：{error_msg}"
-            self.memory.add_ai_message(f"Final Answer: {final_answer}")
-            return final_answer
-        
-        final_answer = "未知错误"
+        final_answer = "任务超过最大执行步骤，无法继续执行。"
+        # task_memory.add_ai_message(f"Final Answer: {final_answer}")
         self.memory.add_ai_message(f"Final Answer: {final_answer}")
+
         return final_answer
+        # # 2. 从 memory 中获取历史上下文
+        # memory_content = self.memory.get_content()
+        # # 3. 构建 prompt
+        # prompt = build_prompt(user_input, memory_content)
+        # print("\n[Prompt]")
+        # print(prompt)
+
+        # # 4. 调用 LLM 生成 Thought / Action
+        # llm_output = call_llm(prompt)
+        # print("\n[LLM Output]")
+        # print(llm_output)
+
+        # # 5. 记录 LLM 输出
+        # self.memory.add_ai_message(llm_output)
+
+        # # 6. 从 LLM 中解析 Action
+        # action = self._extract_action_line(llm_output)
+
+        # # 7. 执行 Action
+        # result = execute_action(action)
+
+        # print(result)
+
+        # # 8. 根据执行的结果返回最终答案
+        # if result["type"] == "observation":
+        #     observation = result["content"]
+        #     self.memory.add_observation(observation)
+        #     final_answer = f"执行完成，工具返回结果：{observation}"
+        #     self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        #     return final_answer
+        
+        # if result["type"] == "finish":
+        #     final_answer = result["content"]
+        #     self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        #     return final_answer
+        # if result["type"] == "error":
+        #     error_msg = result["content"]
+        #     self.memory.add_observation(f"Error: {error_msg}")
+        #     final_answer = f"执行失败，错误原因：{error_msg}"
+        #     self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        #     return final_answer
+        
+        # final_answer = "未知错误"
+        # self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        # return final_answer
     
     def _extract_action_line(self, llm_output: str) -> str:
         """
