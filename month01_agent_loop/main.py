@@ -20,7 +20,7 @@ def main():
 
     agent = LLMAgent()
 
-    print("V1 FakerLLM React Agent Loop")
+    # print("V1 FakerLLM React Agent Loop")
     print("当前支持：")
     print("1. 计算 1 + 2 * 4")
     print("2. 写入 ./test.txt hello world")
