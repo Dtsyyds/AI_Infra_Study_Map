@@ -78,22 +78,77 @@ def parse_Finish(input: str) -> str:
     }
 
 def parse_action(input: str) -> dict:
-    if not input.startswith("Action:"):
-        return f"Action判断不是有效的调用工具指令"
-    # 去掉前面的 action
-    action_text =  input[len("Action:"):].strip()
+    # if not input.startswith("Action:"):
+    #     return f"Action判断不是有效的调用工具指令"
+    # # 去掉前面的 action
+    # action_text =  input[len("Action:"):].strip()
 
-    # 情况1 Finish
-    finish_match = re.search(r"Finish\[(.*)\]", action_text)
-    # print(finish_match)
+    # # 情况1 Finish
+    # finish_match = re.search(r"Finish\[(.*)\]", action_text)
+    # # print(finish_match)
+    # if finish_match:
+    #     return {
+    #         "type": "finish",
+    #         "content": finish_match.group(1).strip()
+    #     }
+    
+    # # 情况2 其他工具
+    # tool_match = re.search(r"(\w+)\((.*)\)", action_text)
+    # if not tool_match:
+    #     return {
+    #         "type": "error",
+    #         "content": "不是有效的工具调用指令"
+    #     }
+    # tool_name = tool_match.group(1)
+    # args_text = tool_match.group(2)
+
+    # # 解析表达式中的参数
+    # args_pair = re.findall(r'(\w+)="([^"]*)"', args_text)
+    # args = dict(args_pair)
+
+    # return {
+    #     "type": "tool",
+    #     "tool_name": tool_name,
+    #     "args": args
+    # }
+
+    """
+    解析 Action 指令
+
+    支持：
+    Action: calculator(expression="1 + 2 * 4")
+    Action：calculator(expression="1 + 2 * 4")
+    Action: Finish[最终答案]
+    Action：Finish[最终答案]
+    """
+    text = input.strip()
+
+    # 统一中文冒号
+    text = text.replace("：", ":")
+
+    if not text.startswith("Action:"):
+        return {
+            "type": "error",
+            "content": f"不是有效的 Action 指令"
+        }
+    
+    # 去掉前面的 action
+    action_text = text[len("Action:"):].strip()
+
+    # 情况 1：Finish
+    pattern = r"Finish\[(.*)\]"
+    finish_match = re.search(pattern, action_text)
+
     if finish_match:
         return {
             "type": "finish",
             "content": finish_match.group(1).strip()
         }
     
-    # 情况2 其他工具
-    tool_match = re.search(r"(\w+)\((.*)\)", action_text)
+    # 情况 2： 其他工具
+    pattern = r"(\w+)\((.*)\)"
+    tool_match = re.search(pattern, action_text)
+
     if not tool_match:
         return {
             "type": "error",
@@ -103,6 +158,8 @@ def parse_action(input: str) -> dict:
     args_text = tool_match.group(2)
 
     # 解析表达式中的参数
+    # args_pair = re.find(r"(\w+)=\"(.*)\"", args_text)
+    # 输入：name="John" age="25" 输出：[('name', 'John" age="25')]  ❌ 全吞了！ 因为 .* 贪婪匹配，会从 John 后面的引号一直吃到最后一个引号（即 25 后面的引号），把所有中间内容都当成了 group(2)
     args_pair = re.findall(r'(\w+)="([^"]*)"', args_text)
     args = dict(args_pair)
 
@@ -111,12 +168,33 @@ def parse_action(input: str) -> dict:
         "tool_name": tool_name,
         "args": args
     }
-
-
+    """
+    (\w+)    匹配一个或多个单词字符，这里的参数名 expression
+    =        匹配等号
+    "        匹配左双引号
+    ([^"]*)  匹配双引号里面的内容   [^"]    匹配任意一个不是双引号的字符 ^取反  [^"]* 连续匹配任意多个非双引号字符
+    "        匹配右双引号
+    """
 if __name__ == "__main__":
-    print(parse_action(cal_text))
-    print(parse_action(read_text))
-    print(parse_action(write_text))
-    print(parse_action(finish_text))
+    # print(parse_action(cal_text))
+    # print(parse_action(read_text))
+    # print(parse_action(write_text))
+    # print(parse_action(finish_text))
+
+    test_cases = [
+        'Action: calculator(expression="1 + 2 * 4")',
+        'Action：calculator(expression="1 + 2 * 4")',
+        'Action: read_file(path="./test.txt")',
+        'Action：write_file(path="./test.txt", content="hello world")',
+        'Action: Finish[任务完成]',
+        'Action：Finish[任务完成]',
+        'hello world',
+        'Action: wrong format',
+    ]
+
+    for text in test_cases:
+        print(f"测试用例：{text}")
+        result = parse_action(text)
+        print("解析结果:", result)
 
 

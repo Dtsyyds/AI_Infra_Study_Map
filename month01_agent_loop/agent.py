@@ -23,6 +23,7 @@ from executor import execute_action
 from memory import Memory
 from prompts import build_prompt
 from llm import *
+import re
 
 class RuleBaseAgent:
     """
@@ -265,14 +266,54 @@ class LLMAgent:
         executor.py 只需要 Action 行
         """
 
-        for line in llm_output.splitlines():
+        # for line in llm_output.splitlines():
+        #     line = line.strip()
+
+        #     if line.startswith("Action:"):
+        #         return line
+            
+        # return "Action: Finish[LLM 输出中没有 Action 行]"
+
+        """
+        从 LLM 输出中提取 Action 行
+
+        支持：
+        1. Action: calculator()
+        2. Action：calculator()
+        3. Markdown 代码在块中的 Action
+        4. 前面带多余解释的输出
+        """
+        text = llm_output.strip()
+
+        # 去掉 Markdown 代码块标记
+        text = text.replace("```text", "")
+        text = text.replace("```python", "")
+        text = text.replace("```", "")
+
+        # 统一中文冒号
+        text = text.replace("Action：", "Action:")
+
+        # 第一优先级，逐行查找 Action
+        for line in text.splitlines():
             line = line.strip()
 
             if line.startswith("Action:"):
                 return line
             
-        return "Action: Finish[LLM 输出中没有 Action 行]"
-    
+        # 第二优先级：整段文本中正则匹配 Action:
+        pattern = r"Action\s*[:]\s*(.+)"       # r:表示原始字符串，不转义 Action：字面匹配字符 Action \s* 匹配0个或多个空白字符 [:] 匹配一个冒号 \s* 再次匹配0个或多个空白字符 (.+) 匹配一个或多个任意字符（除换行符\n）
+        """
+        匹配项：
+
+        Action: Start 匹配      Action : Run 匹配，空格任意     Action:: test 不匹配，只允许一个冒号       Action:  不匹配，冒号后面至少需要一个字符
+        """
+        match = re.search(pattern, text)
+
+        if match:
+            return "Action: " + match.group(1).strip()
+        
+        return "Action: Finish[模型没有输出 Action]"
+                
     def show_memory(self) -> str:
         return self.memory.get_content()
     
