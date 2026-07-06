@@ -163,6 +163,7 @@ class LLMAgent:
 
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
+        action_history = []
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
 
@@ -179,6 +180,17 @@ class LLMAgent:
 
             action =  self._extract_action_line(llm_output)
 
+            # 同一个任务里，如果模型第二次调用完全相同的 Action，就停止执行
+            if action in action_history:
+                final_answer = (
+                    "模型重复调用了相同的 Action, Agent 已停止执行，避免死循环。\n"
+                    f"重复 Action: {action}"
+                )
+
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                return final_answer
+            
+            action_history.append(action)
             result = execute_action(action)
 
             if result["type"] == "observation":

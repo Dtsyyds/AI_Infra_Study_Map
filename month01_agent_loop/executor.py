@@ -53,9 +53,17 @@ def execute_action(action_text: str) -> dict:
 
         observation = run_tool(tool_name, **args)
 
+        # return {
+        #     "type": "observation",
+        #     "content": observation
+        # }
+
+        success = not observation.startswith("TOOL_ERROR:")
+
         return {
             "type": "observation",
-            "content": observation
+            "content": observation,
+            "success": success
         }
 
     return {

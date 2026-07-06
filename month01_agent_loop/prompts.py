@@ -50,6 +50,16 @@ Finish[最终回答]
 
 - 如果历史记忆中已经有 observation, 说明工具已经执行完成，你应该根据 observation 输出 Finish[最终答案]
 
+- 最终回答不要保留 TOOL_OK: 和 TOOL_ERROR: , 要转成自然语言
+
+工具返回结果规则：
+
+- 如果 observation 以 TOOL_OK: 开头，说明工具执行成功。你应该根据 observation 输出 Finish[最终答案]，不要再次调用同一个工具。
+- 如果 observation 以 TOOL_ERROR: 开头，说明工具执行失败。你需要分析失败原因。
+- 如果错误可以根据已有信息明确修复，你可以输出一个新的 Action 尝试修复。
+- 如果错误不能明确修复，你应该输出 Action: Finish[说清楚失败原因，并告诉用户需要检查什么]。
+- 不要连续重复调用完全相同的Action, 避免死循环。
+
 """
 
 def build_prompt(user_input: str, memory_content: str) -> str:
