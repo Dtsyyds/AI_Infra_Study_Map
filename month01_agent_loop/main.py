@@ -18,7 +18,7 @@ def main():
     # print("输入 memory 查看记忆")
     # print("输入 clear 清空记忆")
 
-    agent = LLMAgent()
+    agent = LLMAgent(max_steps=5)
 
     # print("V1 FakerLLM React Agent Loop")
     print("当前支持：")

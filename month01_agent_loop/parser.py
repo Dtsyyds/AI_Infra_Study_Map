@@ -66,7 +66,7 @@ def parse_Finish(input: str) -> str:
     # \( 匹配左括号
     # (.*) 匹配括号里面的参数
     # \) 匹配右括号
-    match = re.search(pattern_text, input)
+    match = re.search(pattern_text, input, flags=re.DOTALL)
     if not match:
         return f"不是有效的结束指令"
     Finish_text = match.group(1)
@@ -134,20 +134,24 @@ def parse_action(input: str) -> dict:
     
     # 去掉前面的 action
     action_text = text[len("Action:"):].strip()
-
+    print(f"内部查看提取的action_text:{action_text}")
     # 情况 1：Finish
-    pattern = r"Finish\[(.*)\]"
-    finish_match = re.search(pattern, action_text)
-
+    pattern = r"Finish\[(.*)\]$"
+    finish_match = re.search(pattern, action_text, flags=re.DOTALL)
+    print(f"finish_match:{finish_match}")
     if finish_match:
+        content = finish_match.group(1).strip()
+        content = content.replace("\\n", "\n")
+
         return {
             "type": "finish",
-            "content": finish_match.group(1).strip()
+            "content": content
         }
     
     # 情况 2： 其他工具
     pattern = r"(\w+)\((.*)\)"
     tool_match = re.search(pattern, action_text)
+    print(f"tool_match:{tool_match}")
 
     if not tool_match:
         return {

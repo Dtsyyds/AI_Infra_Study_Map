@@ -174,12 +174,15 @@ class LLMAgent:
             prompt = build_prompt(user_input, memory_content)
             
             llm_output = call_llm(prompt)
+            print("\n[LLM Output]")
+            print(llm_output)
 
             task_memory.add_ai_message(llm_output)
             self.memory.add_ai_message(llm_output)
 
             action =  self._extract_action_line(llm_output)
-
+            print("\n[Agent Action]")
+            print(action)
             # 同一个任务里，如果模型第二次调用完全相同的 Action，就停止执行
             if action in action_history:
                 final_answer = (
@@ -192,6 +195,8 @@ class LLMAgent:
             
             action_history.append(action)
             result = execute_action(action)
+            print("\n[RESULT]")
+            print(result)
 
             if result["type"] == "observation":
                 observation = result["content"]
@@ -294,6 +299,19 @@ class LLMAgent:
         2. Action：calculator()
         3. Markdown 代码在块中的 Action
         4. 前面带多余解释的输出
+
+        由于 LLM 输出的不确定性，真实模型有时会输出多行 Action, 有时会输出单行，现重新优化代码：
+        支持：
+        1. 单行工具调用：
+            Action: calculator(expression="1 + 2 * 4")
+        2. 单行 Finish
+            Action: Finish[结果]
+        3. 多行 Finish:
+            Action: Finish[第一行
+            第二行
+            第三行]
+        4. 中文冒号
+            Action：calculator(expression="1 + 2 * 4")
         """
         text = llm_output.strip()
 
@@ -305,26 +323,48 @@ class LLMAgent:
         # 统一中文冒号
         text = text.replace("Action：", "Action:")
 
-        # 第一优先级，逐行查找 Action
-        for line in text.splitlines():
-            line = line.strip()
+        # 优先匹配多行 Finish
+        finish_match = re.search(
+            r"Action:\s*Finish\[(.*)\]\s*$",    # $ 匹配字符串的结尾，意味着 Finish[...]必须是整段文本的最后一部分，后面不能再有其他字符
+            text,
+            flags=re.DOTALL     # 默认情况下正则匹配里面 . 不匹配换行符，加上这个标志，就可以匹配包括换行符在内的任意字符
+        )
 
-            if line.startswith("Action:"):
-                return line
-            
-        # 第二优先级：整段文本中正则匹配 Action:
-        pattern = r"Action\s*[:]\s*(.+)"       # r:表示原始字符串，不转义 Action：字面匹配字符 Action \s* 匹配0个或多个空白字符 [:] 匹配一个冒号 \s* 再次匹配0个或多个空白字符 (.+) 匹配一个或多个任意字符（除换行符\n）
-        """
-        匹配项：
-
-        Action: Start 匹配      Action : Run 匹配，空格任意     Action:: test 不匹配，只允许一个冒号       Action:  不匹配，冒号后面至少需要一个字符
-        """
-        match = re.search(pattern, text)
-
-        if match:
-            return "Action: " + match.group(1).strip()
+        if finish_match:
+            content = finish_match.group(1).strip()
+            return f"Action: Finish[{content}]"
         
+        # 再匹配工具调用，一般工具调用都是一行
+        pattern =  r"Action:\s*(\w+\(.*?\))"
+        tool_match = re.search(
+            pattern,
+            text,
+            flags=re.DOTALL
+        )
+        if tool_match:
+            return f"Action: " + tool_match.group(1).strip()
+
         return "Action: Finish[模型没有输出 Action]"
+        # # 第一优先级，逐行查找 Action
+        # for line in text.splitlines():
+        #     line = line.strip()
+
+        #     if line.startswith("Action:"):
+        #         return line
+            
+        # # 第二优先级：整段文本中正则匹配 Action:
+        # pattern = r"Action\s*[:]\s*(.+)"       # r:表示原始字符串，不转义 Action：字面匹配字符 Action \s* 匹配0个或多个空白字符 [:] 匹配一个冒号 \s* 再次匹配0个或多个空白字符 (.+) 匹配一个或多个任意字符（除换行符\n）
+        # """
+        # 匹配项：
+
+        # Action: Start 匹配      Action : Run 匹配，空格任意     Action:: test 不匹配，只允许一个冒号       Action:  不匹配，冒号后面至少需要一个字符
+        # """
+        # match = re.search(pattern, text)
+
+        # if match:
+        #     return "Action: " + match.group(1).strip()
+        
+        # return "Action: Finish[模型没有输出 Action]"
                 
     def show_memory(self) -> str:
         return self.memory.get_content()
