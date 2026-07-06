@@ -15,3 +15,14 @@ LLM 输出 Action
 - LLM 输出 Finish
 
 Thought -> Action -> Observation -> Thought -> Finish
+
+## Robust Real LLM ReAct Agent
+
+本阶段完成真实 LLM 的输出解析增强
+
+parser 增强 Action 解析逻辑，支持中文冒号，支持工具调用解析，支持多参数解析，支持 Finish 解析，新增错误处理兜底
+
+agent 增强 LLM 输出的 Action 提取逻辑，支持中文冒号，支持 Markdown 代码块提取 Action, 支持全文提取 Action，支持无 Action 兜底处理
+
+
+

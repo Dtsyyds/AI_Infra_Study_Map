@@ -1,6 +1,7 @@
 # include <iostream>
 # include <vector>
 # include <unordered_map>
+# include <algorithm>
 
 using namespace std;
 
@@ -16,6 +17,7 @@ int main()
     //     // 没查到怎么更新
 
     // }
+    return 0;
 }
 
 /*
@@ -29,23 +31,24 @@ int main()
 */
 class Solution_0001
 {
-    vector<int> twoSum(vector<int>& nums, int target)
-    {
-        unordered_map<int, int> hashtable;
-        for(int i = 0; i < nums.size(); i++)
+    public:
+        vector<int> twoSum(vector<int>& nums, int target)
         {
-            auto it = hashtable.find(target - nums[i]);
-
-            if(it != hashtable.end())
+            unordered_map<int, int> hashtable;
+            for(int i = 0; i < nums.size(); i++)
             {
-                return {i. it->second()};
+                auto it = hashtable.find(target - nums[i]);
+
+                if(it != hashtable.end())
+                {
+                    return {i, it->second};
+                }
+                hashtable[nums[i]] = i;     // 将当前遍历到的数组元素 nums[i] 作为键，将其下标作为值存入哈希表
+                // hashtable[i] = nums[i];  // 这样写恰恰相反，需要和之前遍历的一一对应
             }
-            hashtable[nums[i]] = i;     // 将当前遍历到的数组元素 nums[i] 作为键，将其下标作为值存入哈希表
-            // hashtable[i] = nums[i];  // 这样写恰恰相反，需要和之前遍历的一一对应
+            return {};
         }
-        return {};
-    }
-}
+};
 
 /*
 例题2 多数元素
