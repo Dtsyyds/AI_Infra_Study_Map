@@ -164,6 +164,7 @@ class LLMAgent:
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
         action_history = []
+        last_observation = ""
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
 
@@ -183,13 +184,28 @@ class LLMAgent:
             action =  self._extract_action_line(llm_output)
             print("\n[Agent Action]")
             print(action)
-            # 同一个任务里，如果模型第二次调用完全相同的 Action，就停止执行
+            # # 同一个任务里，如果模型第二次调用完全相同的 Action，就停止执行
+            # if action in action_history:
+            #     final_answer = (
+            #         "模型重复调用了相同的 Action, Agent 已停止执行，避免死循环。\n"
+            #         f"重复 Action: {action}"
+            #     )
+            
+            #     self.memory.add_ai_message(f"Final Answer: {final_answer}")
+            #     return final_answer
+            
+            # 如果上一次工具已经成功，但模型重复调用同一个 Action, 就让 Agent 直接基于上一次 observation 返回一个更自然的失败兜底
             if action in action_history:
-                final_answer = (
-                    "模型重复调用了相同的 Action, Agent 已停止执行，避免死循环。\n"
-                    f"重复 Action: {action}"
-                )
-
+                if last_observation.startswith("TOOL_OK:"):
+                    final_answer = (
+                        "工具已经成功返回结果，但模型重复调用了相同的 Action。"
+                        "请根据上一次工具结果重新提问，或者看调试输出中的 Observation。"
+                    )
+                else:
+                    final_answer = (
+                        "模型重复调用了相同的 Action, Agent 已停止执行，避免死循环。"
+                        f"重复 Action: {action}"
+                    )
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
                 return final_answer
             
@@ -200,6 +216,7 @@ class LLMAgent:
 
             if result["type"] == "observation":
                 observation = result["content"]
+                last_observation = observation
                 task_memory.add_observation(observation)
                 self.memory.add_observation(observation)
 

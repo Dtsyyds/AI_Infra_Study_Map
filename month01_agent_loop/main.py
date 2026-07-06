@@ -25,6 +25,7 @@ def main():
     print("1. 计算 1 + 2 * 4")
     print("2. 写入 ./test.txt hello world")
     print("3. 读取 ./test.txt")
+    print("4. 查看当前目录下的文件")
     print("输入 exit / quit 退出")
     print("输入 memory 查看记忆")
     print("输入 clear 清空记忆")

@@ -1,3 +1,5 @@
+from tools import get_tool_description
+
 """
 prompts.py
 
@@ -93,18 +95,87 @@ def build_prompt(user_input: str, memory_content: str) -> str:
     Returns:
         完整的 prompt 字符串    
     """
-    prompt = SYSTEM_PROMPT.strip()
+    tool_descriptions = get_tool_description()
+    prompt = f"""
+你是一个最小 Agent Loop 学习项目中的智能体
 
-    if memory_content:
-        prompt += f"\n\n历史记忆:\n"
-        prompt += memory_content.strip()
+你可以使用以下工具：
 
-    prompt += f"\n\n用户输入:\n"
-    prompt += user_input.strip()
+{tool_descriptions}
 
-    prompt += f"\n\n请按照 Thought / Action 格式输出："
+你必须严格按照下面的格式输出：
 
-    return prompt
+Thought: 你的思考
+Action: 你的行动工具调用或者Finish
+
+Action 只能是以下格式之一：
+
+calculator(expression="...")
+read_file(path="...")
+write_file(path="...", content="...")
+Finish[最终回答]
+
+要求：
+- 每次只能输出一个 Thought 和一个 Action
+- 如果需要工具，就输出工具调用
+- 如果已经得到答案，就输出 Finish[最终回答]
+- 不要输出任何其他内容
+- 不要使用不存在的工具
+
+- 如果历史记忆中已经有 observation, 说明工具已经执行完成，你应该根据 observation 输出 Finish[最终答案]
+
+- 最终回答不要保留 TOOL_OK: 和 TOOL_ERROR: , 要转成自然语言
+
+- Action 必须放在一行。如果最终回答包含换行，请使用 \n 换行，不要在 Action 中直接换行
+
+- 如果当前任务中已经有 observation, 并且 observation 以 TOOL_OK: 开头，你必须基于该 observation 输出 Action: Finish[最终回答]。
+- 不要为了“确认最新状态”重复调用同一个工具。
+- 不要在工具已经成功返回结果后再次调用相同的 Action。
+- 当 list_files 已经返回目录内容后，你必须整理目录内容并 Finish, 不要再调用 list_files。
+- 只有当 observation 是 TOOL_ERROR:, 并且需要更多信息时，才允许继续调用其他工具。
+
+
+文件安全规则：
+
+- 不要主动读取 .env .git .ssh 密钥文件，证书文件等敏感路径。
+- 如果工具返回“出于安全考虑，禁止读取敏感路径”，你应该向用户说明该路径属于敏感路径不方便读取。
+- 当用户指定的文件不存在时，可以调用 list_files 查看目录内容
+- list_files 返回候选文件后，不要擅自读取猜测的文件
+- 如果不能明确确定用户想读取哪个文件，应输出 Action: Finish[说明文件不存在，并列出可能的候选文件，请用户确认]
+
+
+工具返回结果规则：
+
+- 如果 observation 以 TOOL_OK: 开头，说明工具执行成功。你应该根据 observation 输出 Finish[最终答案]，不要再次调用同一个工具。
+- 如果 observation 以 TOOL_ERROR: 开头，说明工具执行失败。你需要分析失败原因。
+- 如果错误可以根据已有信息明确修复，你可以输出一个新的 Action 尝试修复。
+- 如果错误不能明确修复，你应该输出 Action: Finish[说清楚失败原因，并告诉用户需要检查什么]。
+- 不要连续重复调用完全相同的Action, 避免死循环。
+- 如果 read_file 返回 TOOL_ERROR, 并且错误原因是文件不存在，你可以调用 list_files 查看该文件所在的目录。
+- 如果用户请求读取文件，而文件不存在，你可以优先调用 list_files(path=".") 查看当前目录。
+- 如果路径中包含目录，例如 ./tmp/xxx.txt 文件不存在，可以调用 list_files(path="./tmp") 查看该目录内容。
+- list_files 只用于排查文件路径，不要无意义反复调用。
+
+历史记忆：
+{memory_content}
+
+用户输入：
+{user_input}
+
+请输出 Thought 和 Action 
+"""
+    # prompt = SYSTEM_PROMPT.strip()
+
+    # if memory_content:
+    #     prompt += f"\n\n历史记忆:\n"
+    #     prompt += memory_content.strip()
+
+    # prompt += f"\n\n用户输入:\n"
+    # prompt += user_input.strip()
+
+    # prompt += f"\n\n请按照 Thought / Action 格式输出："
+
+    return prompt.strip()
 
 if __name__ == "__main__":
     user_input = "帮我计算 1 + 2 * 4 的结果"

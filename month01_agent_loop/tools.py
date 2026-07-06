@@ -17,6 +17,56 @@ import os
 from typing import Callable, Dict, List
 from simpleeval import simple_eval
 
+SENSITIVE_TOOLS = {
+    ".env", # 环境变量
+    ".gitignore", # git 忽略文件
+    ".git",
+    ".idea",
+    ".ssh",
+    ".aws",
+    ".config",
+    "id_rsa",
+    "id_rsa_pub",
+}
+
+SENSITIVE_SUFFIXES = {
+    ".pem",
+    ".key",
+    ".crt",
+    ".p12",
+    ".pfx",
+}
+
+def is_hidden_name(name: str) -> bool:
+    return name.startswith('.') or any(suffix in name for suffix in SENSITIVE_SUFFIXES)
+    """
+    硬规则：识别系统原生隐藏的点号前缀（.xxx）。
+
+    软规则：强制把开发人员自定义的“高危/临时”后缀（即使系统不隐藏它）也归入隐藏类别，从而阻止用户误操作。
+    """
+
+def is_sensitive_path(path: str) -> bool:
+    """
+    判断路径是否属于敏感路径
+
+    策略:
+    1. 路径中包含 .env / .git / .ssh 等敏感名称
+    2. 文件后缀是 .pem / .key / .crt 等密钥证书文件
+    """
+    normalized_path = os.path.normpath(path)
+    parts = normalized_path.split(os.sep)
+
+    for part in parts:
+        if part in SENSITIVE_TOOLS:
+            return True
+
+    for suffix in SENSITIVE_SUFFIXES:
+        if path.endswith(suffix):
+            return True
+
+    return False
+
+
 def calculator(expression: str) -> str:
     """
     简单计算器工具
@@ -37,6 +87,8 @@ def calculator(expression: str) -> str:
 
 def read_file(path: str) -> str:
     """
+    在读取之前增加敏感判断
+
     读取文本文件工具
     Args:
         path: 文件路径
@@ -46,6 +98,8 @@ def read_file(path: str) -> str:
     try:
         if not path:
             return tool_error("读取失败：path 不能为空")
+        if is_sensitive_path(path):
+            return tool_error(f"读取失败：路径是敏感路径: {path}")
         if not os.path.exists(path):
             return tool_error(f"读取失败: 文件不存在: {path}")
         if os.path.isdir(path):
@@ -55,7 +109,72 @@ def read_file(path: str) -> str:
             return tool_ok(str(f.read()))
     except Exception as e:
         return tool_error(f"读取失败: {e}")
+
+def list_files(path: str, show_hidden: str="false") -> str:
+    """
+    列出在指定路径下的所有文件和子目录
+
+    Args:
+        path: 目录路径，默认当前路径
+
+    Returns:
+        文件和子目录列表
+    """
+    try:
+        # 默认当前路径
+        if not path:
+            path = "."
+        path = path.strip()
+
+        show_hidden_bool = str(show_hidden).lower() == "true"
+        # 将用户传入的 show_hidden 参数（无论是什么类型），统一解析并转换为一个标准的布尔值（True 或 False），用于决定是否“展示隐藏文件”
+
+        if not os.path.exists(path):
+            return tool_error(f"读取失败：路径不存在 {path}")
+        if not os.path.isdir(path):
+            return tool_error(f"读取失败：当前路径不是有效的目录 {path}")
+        
+        if is_sensitive_path(path):
+            return tool_error(f"读取失败：路径是敏感路径: {path}")
+        
+        files = os.listdir(path)
+
+        if not files:
+            return tool_ok(f"目录 {path} 是空目录")
+        
+        lines = [f"目录 {path} 下包含："]
+
+        visible_count = 0
+        hidden_mark = 0
+
+        for file in sorted(files):
+            full_path = os.path.join(path, file)
+
+            if is_hidden_name(file) or is_sensitive_path(full_path):
+                hidden_mark += 1
+                if not show_hidden_bool:
+                    continue
+
+
+
+            if os.path.isdir(full_path):
+                lines.append(f"[DIR]: {file}")
+
+            if os.path.isfile(full_path):
+                lines.append(f"[FILE]: {file}")
+
+            visible_count += 1
+
+        if visible_count == 0:
+            lines.append("没有可见文件")
+        if hidden_mark > 0:
+            lines.append(f"隐藏文件数量: {hidden_mark}")
+
+        return tool_ok("\n".join(lines))        # 将一个字符串列表 lines 用换行符连接成一个大的多行字符串
     
+    except Exception as e:
+        return tool_error(f"读取失败：{e}")
+  
 def write_file(path: str, content: str) -> str:
     """
     写入文本文件工具
@@ -72,6 +191,8 @@ def write_file(path: str, content: str) -> str:
             return tool_error("写入失败：content 不能为空")
         # if not os.path.exists(path):
         #     return tool_error(f"写入失败，文件不存在：{path}")
+        if is_sensitive_path(path):
+            return tool_error(f"写入失败：路径是敏感路径: {path}")
         if os.path.isdir(path):
             return tool_error(f"写入失败：当前路径是目录而不是文件: {path}")
         
@@ -91,14 +212,96 @@ TOOLS: Dict[str, Callable] = {
     "calculator": calculator,
     "read_file": read_file,
     "write_file": write_file,
+    "list_files": list_files,
 }
 
-def get_tool_name() -> List[str]:
+# 升级为工具注册表
+TOOL_REGISTRY: Dict[str, Dict] = {
+    "calculator":{
+        "func": calculator,
+        "description": "计算数学表达式",
+        "args":{
+            "expression": "数学表达式字符串，如 1 + 2 * 4"
+        },
+        "examples":[
+            'Action: calculator(expression="1 + 2 * 4")',
+            'Action: calculator(expression="2 * (3 + 4)")',
+            'Action: calculator(expression="sin(pi/2))"'
+        ]
+    },
+
+    "read_file":{
+        "func": read_file,
+        "description": "读取指定文本文件的内容",
+        "args":{
+            "path": "要读取的文件路径，如 ./test.txt"
+        },
+        "examples":[
+            'Action: read_file(path="./README.md")',
+            'Action: read_file(path="./test.txt")'
+        ]
+    },
+
+    "write_file":{
+        "func": write_file,
+        "description": "向指定的文本文件中写入内容, 如果父目录不存在，会自动创建",
+        "args":{
+            "path": "要写入的文件路径，如 ./test.txt",
+            "content": "要写入的内容，如 'Hello World!'"
+        },
+        "examples":[
+            'Action: write_file(path="./test.txt", content="Hello World!")',
+            'Action: write_file(path="/tmp/test.txt", content="Hello World!\n")'
+        ]
+    },
+
+    "list_files":{
+        "func": list_files,
+        "description": "列出指定目录下的所有文件和子目录",
+        "args":{
+            "path": "要列出的目录路径，默认为当前路径",
+            "show_hidden": "是否显示隐藏文件，默认为否"
+        },
+        "examples":[
+            'Action: list_files(path="./")',
+            'Action: list_files(path="./", show_hidden="true")'
+        ]
+    }
+}
+
+        
+
+def get_tool_names() -> List[str]:
     """
     返回当前注册的工具名称列表
     """
-    return list(TOOLS.keys())
+    return list(TOOL_REGISTRY.keys())
 
+def get_tool_description() -> str:
+    """
+    返回工具描述信息
+    """
+    lines = []
+
+    for index, (tool_name, spec) in enumerate(TOOL_REGISTRY.items(), start=1):
+        # TOOL_REGISTRY.items() 返回字典的（键，值）元组件
+        # (tool_name, spec)：这里外层加括号是因为 enumerate 返回的是 (索引, (键, 值))，用括号直接把内部的元组解包给两个变量，写法非常 Pythonic
+        # start=1：让编号从 1 开始，而非默认的 0，更符合人类阅读习惯（第1个工具、第2个工具...）
+
+        # 函数没有直接用字符串拼接（+=），而是定义了一个 lines = []，不断 append
+        lines.append(f"{index}.{tool_name}")
+        lines.append(f"   功能：{spec['description']}")
+        lines.append("   参数：")
+
+        for arg_name, arg_desc in spec["args"].items():
+            lines.append(f"      {arg_name}: {arg_desc}")
+
+        lines.append("   示例：")
+        for example in spec['examples']:
+            lines.append(f"  - {example}")
+        lines.append('')
+
+    return "\n".join(lines)
 # 新增辅助函数，统一工具返回格式
 def tool_ok(content: str) -> str:
     return f"TOOL_OK: {content}"
@@ -116,10 +319,15 @@ def run_tool(tool_name: str, **kwargs) -> str:
     Returns:
         工具执行结果
     """
-    if tool_name not in TOOLS:
+    # if tool_name not in TOOLS:
+    #     return tool_error(f"未知工具：{tool_name}")
+    
+    # tool = TOOLS[tool_name]
+
+    if tool_name not in TOOL_REGISTRY:
         return tool_error(f"未知工具：{tool_name}")
     
-    tool = TOOLS[tool_name]
+    tool = TOOL_REGISTRY[tool_name]["func"]
 
     try:
         result = tool(**kwargs)
@@ -148,9 +356,17 @@ if __name__ ==  "__main__":
     # print("\n测试参数错误")
     # print(run_tool("calculator", "1 + 2 * 3"))
 
+    print("当前工具列表:")
+    print(get_tool_names())
+
+    print("\n工具说明:")
+    print(get_tool_description())
+
     print(run_tool("calculator", expression="1 + 2 * 4"))
     print(run_tool("read_file", path="./not_exist.txt"))
     print(run_tool("write_file", path="./tmp/v5_test.txt", content="hello v5"))
     print(run_tool("read_file", path="./tmp/v5_test.txt"))
     print(run_tool("unknown_tool"))
+    print(run_tool("list_files", path="./not_exist_dir"))
+    print(run_tool("list_files", path="../"))
     

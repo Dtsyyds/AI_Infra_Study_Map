@@ -134,11 +134,11 @@ def parse_action(input: str) -> dict:
     
     # 去掉前面的 action
     action_text = text[len("Action:"):].strip()
-    print(f"内部查看提取的action_text:{action_text}")
+    # print(f"内部查看提取的action_text:{action_text}")
     # 情况 1：Finish
     pattern = r"Finish\[(.*)\]$"
     finish_match = re.search(pattern, action_text, flags=re.DOTALL)
-    print(f"finish_match:{finish_match}")
+    # print(f"finish_match:{finish_match}")
     if finish_match:
         content = finish_match.group(1).strip()
         content = content.replace("\\n", "\n")
@@ -151,7 +151,7 @@ def parse_action(input: str) -> dict:
     # 情况 2： 其他工具
     pattern = r"(\w+)\((.*)\)"
     tool_match = re.search(pattern, action_text)
-    print(f"tool_match:{tool_match}")
+    # print(f"tool_match:{tool_match}")
 
     if not tool_match:
         return {
