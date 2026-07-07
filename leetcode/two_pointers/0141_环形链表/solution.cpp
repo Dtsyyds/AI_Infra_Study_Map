@@ -3,27 +3,31 @@
 
 using namespace std;
 
+struct ListNode {
+    int val;
+    ListNode *next;
+    ListNode(int x) : val(x), next(NULL) {}
+};
+
 class Solution{
     public:
-        vector<int> twoSum(vector<int>& nums, int target)
+        bool hasCycle(ListNode *head)
         {
-            int left = 0;
-            int right = nums.size() - 1;
-            while(left < right)
+            if(head == NULL || head -> next == NULL)
+                return false;
+            ListNode *fast = head -> next -> next;
+            ListNode *slow = head;
+
+            while(fast != NULL && fast -> next != NULL)
             {
-                if(nums[left] + nums[right] == target)
+                if(fast == slow)
                 {
-                    return {left, right};
+                    return true;
                 }
-                else if(nums[left] + nums[right] < target)
-                {
-                    left++;
-                }
-                else
-                {
-                    right--;
-                }
+                fast = fast -> next -> next;
+                slow = slow -> next;
             }
-            return {};
+            return false;
+            
         }
 };

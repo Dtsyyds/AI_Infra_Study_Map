@@ -1,6 +1,7 @@
 # include <iostream>
 # include <vector>
 # include <unordered_map>
+# include <unordered_set>
 # include <algorithm>
 
 using namespace std;
@@ -17,6 +18,39 @@ int main()
     //     // 没查到怎么更新
 
     // }
+
+    // 场景1： unordered_map 映射（键->值）
+    unordered_map<int, int> map;
+    for(int i = 0; i < nums.size(); i++)
+    {
+        int current = nums[i];
+        // 1. 我要查什么
+        int targetKey = target - current;
+        auto it = map.find(targetKey);
+
+        // 2. 查到了怎么处理
+        if(it != map.end())
+        {
+            return {it->second, i};
+        }
+
+        // 3. 没查到怎么更新
+        map[current] = i;
+    }
+
+    // 场景2： unordered_set 集合（只存“有没有来过”）
+    unordered_set<int> set;
+    for(int num : nums)
+    {
+        // 查看当前元素在不在集合里
+        if(set.count(num))
+        {
+            // 在的话说明重复了，做处理
+        }
+        // 不在的话就存入
+        set.insert(num);
+    }
+
     return 0;
 }
 
