@@ -24,6 +24,7 @@ from memory import Memory
 from prompts import build_prompt
 from llm import *
 import re
+from trace import AgentTrace
 
 class RuleBaseAgent:
     """
@@ -160,13 +161,16 @@ class LLMAgent:
         """
         执行最大次数下的 Agent 流程
         """
-
+        # Agent trace 记录
+        trace = AgentTrace()
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
         action_history = []
         last_observation = ""
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
+        # 同步记录到 track 中
+        trace.set_user_input(user_input)
 
         for step in range(self.max_steps):
             print(f"======== step: {step} ======")
@@ -207,12 +211,20 @@ class LLMAgent:
                         f"重复 Action: {action}"
                     )
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                trace.finish(final_answer, status="stopped")
                 return final_answer
             
             action_history.append(action)
             result = execute_action(action)
             print("\n[RESULT]")
             print(result)
+
+            trace.add_step(
+                step_index=step,
+                llm_output=llm_output,
+                action=action,
+                result=result
+            )
 
             if result["type"] == "observation":
                 observation = result["content"]
@@ -226,6 +238,7 @@ class LLMAgent:
                 final_answer = result["content"]
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                trace.finish(final_answer, status="success")
                 return final_answer
             
             if result["type"] == "error":
@@ -235,11 +248,13 @@ class LLMAgent:
                 final_answer = f"执行失败，错误原因：{error_msg}"
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                trace.fail(error_msg, status="error")
                 return final_answer
         
         final_answer = "任务超过最大执行步骤，无法继续执行。"
         # task_memory.add_ai_message(f"Final Answer: {final_answer}")
         self.memory.add_ai_message(f"Final Answer: {final_answer}")
+        trace.finish(final_answer, status="max_steps_exceeded") 
 
         return final_answer
         # # 2. 从 memory 中获取历史上下文

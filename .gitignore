@@ -49,3 +49,6 @@ leetcode/**/solution
 /test.txt
 /test.text
 month01_agent_loop/test.txt
+
+# agent runtime logs
+month01_agent_loop/logs

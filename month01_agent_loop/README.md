@@ -56,4 +56,17 @@ agent 增强 LLM 输出的 Action 提取逻辑，支持中文冒号，支持 Mar
 - 工具失败后可以给出自然语言解释
 
 
+### V7.0 Agent Trace 日志系统
+
+- Agent 执行过程的可观测
+- Agent 行为可复盘
+- 后续可以做统计分析
+- 后续可以做 Agent Eval
+- 后续可以做 LLMOps 监控
+
+### V7.1 Agent Trace 日志系统 查看
+
+- trace_view.py 脚本快速查看分析运行日志
+
+
 
