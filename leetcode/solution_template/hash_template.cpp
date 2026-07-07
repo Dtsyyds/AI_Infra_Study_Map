@@ -6,6 +6,7 @@
 
 using namespace std;
 
+
 int main()
 {
     // int n;      // n 是数组的长度
@@ -18,7 +19,8 @@ int main()
     //     // 没查到怎么更新
 
     // }
-
+    vector<int> nums = {2, 7, 11, 15};
+    int target = 9;
     // 场景1： unordered_map 映射（键->值）
     unordered_map<int, int> map;
     for(int i = 0; i < nums.size(); i++)

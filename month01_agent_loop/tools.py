@@ -17,6 +17,15 @@ import os
 from typing import Callable, Dict, List
 from simpleeval import simple_eval
 
+# 当前项目根目录：AI_INFRA_STUDY_MAP
+# tools.py 位于 month01_agent_loop/tool.py
+WORKSPACE_ROOT =  os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..')       # 获取当前 Python 脚本所在目录的父目录的绝对路径，并将结果赋值给变量
+    # __file__ 表示当前文件 tools.py 的路径
+    # os.path.dirname(__file__) 表示当前 Python 脚本所在的目录的绝对路径，得到 tools.py 所在的目录
+    # os.path.join(os.path.dirname(__file__), '..') 拼接上一层目录，得到相对路径指向 month01_agent_loop 的父目录
+    # os.path.abspath() 将相对路径转换为绝对路径，得到项目根目录
+)
 SENSITIVE_TOOLS = {
     ".env", # 环境变量
     ".gitignore", # git 忽略文件
@@ -37,6 +46,56 @@ SENSITIVE_SUFFIXES = {
     ".pfx",
 }
 
+# 增加路径解析函数
+def resolve_workspace_path(path: str) -> tuple[bool, str, str]:
+    """
+    将用户传入的路径解析成 workspace 内的绝对路径。
+
+    Returns:
+        {success, abs_path, error_message}
+
+    success=True:
+        abs_path 是合法的 workspace 内路径
+
+    success=False:
+        error_message 是错误信息
+    """
+    if not path:
+        path = "."
+
+    path = path.strip()
+
+    # 不展开 ~ 开头的路径，避免访问用户主目录
+    if path.startswith("~"):
+        return False, "", f"路径越界：不允许使用用户主目录路径：{path}"
+    
+    # 如果是绝对路径，直接标准化
+    if os.path.isabs(path):
+        abs_path = os.path.abspath(path)
+    else:
+        abs_path = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
+
+    # 判断是否仍在 workspace 内
+    if abs_path != WORKSPACE_ROOT and not abs_path.startswith(WORKSPACE_ROOT + os.sep):
+        return False, "", f"路径越界：只能访问项目目录内部：{path}"
+    
+    return True, abs_path, ""
+
+def to_workspace_display_path(abs_path: str) -> str:
+    """
+    将绝对路径转换成相对 workspace 的展示路径，避免把本机的绝对路径暴露给 LLM。
+    """
+    rel_path = os.path.relpath(abs_path, WORKSPACE_ROOT)
+
+    if rel_path == '.':
+        return '.'
+    elif rel_path.startswith('.'):
+        return rel_path
+    else:
+        return f"./{rel_path}"
+
+# resolve_workplace_path: 检查路径是否合法，并转化为绝对路径
+# to_workspace_display_path: 将绝对路径转换为相对路径 如： /home/dts/AI_INFRA_STUDY_MAP/month01_agent_loop/tools.py -> ./month01_agent_loop/tools.py
 def is_hidden_name(name: str) -> bool:
     return name.startswith('.') or any(suffix in name for suffix in SENSITIVE_SUFFIXES)
     """
@@ -95,17 +154,29 @@ def read_file(path: str) -> str:
     Returns:
         文件内容字符串
     """
+
+    """
+    读取文本工具
+    只能读取 workspace 内部的普通文本文件
+    """
     try:
-        if not path:
+        ok, abs_path, error = resolve_workspace_path(path)      # 所有的文件读取都先经过沙箱检查
+
+        if not ok:
+            return tool_error(f"读取失败：{error}")
+        
+        display_path = to_workspace_display_path(abs_path)
+
+        if not abs_path:
             return tool_error("读取失败：path 不能为空")
-        if is_sensitive_path(path):
-            return tool_error(f"读取失败：路径是敏感路径: {path}")
-        if not os.path.exists(path):
-            return tool_error(f"读取失败: 文件不存在: {path}")
-        if os.path.isdir(path):
-            return tool_error(f"读取失败: 当前路径是目录，不是文件: {path}")
+        if is_sensitive_path(display_path):
+            return tool_error(f"读取失败：路径是敏感路径: {display_path}")
+        if not os.path.exists(abs_path):
+            return tool_error(f"读取失败: 文件不存在: {display_path}")
+        if os.path.isdir(abs_path):
+            return tool_error(f"读取失败: 当前路径是目录，不是文件: {display_path}")
     
-        with open(path, "r", encoding="utf-8") as f:
+        with open(abs_path, "r", encoding="utf-8") as f:
             return tool_ok(str(f.read()))
     except Exception as e:
         return tool_error(f"读取失败: {e}")
@@ -120,35 +191,42 @@ def list_files(path: str, show_hidden: str="false") -> str:
     Returns:
         文件和子目录列表
     """
+    """
+    列出指定目录下的文件和文件夹
+    只能列出 workspace 内部目录
+    默认隐藏隐藏文件和敏感文件
+    """
     try:
-        # 默认当前路径
-        if not path:
-            path = "."
-        path = path.strip()
+        ok, abs_path, error = resolve_workspace_path(path)
+
+        if not ok:
+            return tool_error(f"列出文件失败：{error}")
+        
+        display_path = to_workspace_display_path(abs_path)
 
         show_hidden_bool = str(show_hidden).lower() == "true"
         # 将用户传入的 show_hidden 参数（无论是什么类型），统一解析并转换为一个标准的布尔值（True 或 False），用于决定是否“展示隐藏文件”
 
-        if not os.path.exists(path):
-            return tool_error(f"读取失败：路径不存在 {path}")
-        if not os.path.isdir(path):
-            return tool_error(f"读取失败：当前路径不是有效的目录 {path}")
+        if not os.path.exists(abs_path):
+            return tool_error(f"读取失败：路径不存在 {display_path}")
+        if not os.path.isdir(abs_path):
+            return tool_error(f"读取失败：当前路径不是有效的目录 {display_path}")
         
-        if is_sensitive_path(path):
-            return tool_error(f"读取失败：路径是敏感路径: {path}")
+        if is_sensitive_path(display_path):
+            return tool_error(f"读取失败：路径是敏感路径: {display_path}")
         
-        files = os.listdir(path)
+        files = os.listdir(abs_path)
 
         if not files:
-            return tool_ok(f"目录 {path} 是空目录")
+            return tool_ok(f"目录 {display_path} 是空目录")
         
-        lines = [f"目录 {path} 下包含："]
+        lines = [f"目录 {display_path} 下包含："]
 
         visible_count = 0
         hidden_mark = 0
 
         for file in sorted(files):
-            full_path = os.path.join(path, file)
+            full_path = os.path.join(abs_path, file)
 
             if is_hidden_name(file) or is_sensitive_path(full_path):
                 hidden_mark += 1
@@ -184,19 +262,30 @@ def write_file(path: str, content: str) -> str:
     Returns:
         写入结果字符串
     """
+
+    """
+    写入文本文件工具
+    只能写入 workspace 内部的普通文本文件
+    """
     try:
         if not path:
             return tool_error("写入失败：path 不能为空")
         if not content:
             return tool_error("写入失败：content 不能为空")
+        
+        ok, abs_path, error = resolve_workspace_path(path)
+        if not ok:
+            return tool_error(f"写入失败：{error}")
+        
+        display_path = to_workspace_display_path(abs_path)
         # if not os.path.exists(path):
         #     return tool_error(f"写入失败，文件不存在：{path}")
-        if is_sensitive_path(path):
-            return tool_error(f"写入失败：路径是敏感路径: {path}")
-        if os.path.isdir(path):
-            return tool_error(f"写入失败：当前路径是目录而不是文件: {path}")
+        if is_sensitive_path(display_path):
+            return tool_error(f"写入失败：路径是敏感路径: {display_path}")
+        if os.path.isdir(abs_path):
+            return tool_error(f"写入失败：当前路径是目录而不是文件: {display_path}")
         
-        dir_name = os.path.dirname(path)    # 如果目录不存在，他会自动创建目录
+        dir_name = os.path.dirname(abs_path)    # 如果目录不存在，他会自动创建目录
 
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -204,7 +293,7 @@ def write_file(path: str, content: str) -> str:
         with open(path, "w") as f:
             # return tool_ok(str(f.write(content)))  # 返回写入的字符数
             f.write(content)
-        return tool_ok(f"写入成功: {path}") 
+        return tool_ok(f"写入成功: {display_path}") 
     except Exception as e:
         return tool_error(f"写入失败: {e}")
     
@@ -356,17 +445,20 @@ if __name__ ==  "__main__":
     # print("\n测试参数错误")
     # print(run_tool("calculator", "1 + 2 * 3"))
 
-    print("当前工具列表:")
-    print(get_tool_names())
+    print("WORKSPACE_ROOT:", WORKSPACE_ROOT)
 
-    print("\n工具说明:")
-    print(get_tool_description())
+    print("\n正常访问:")
+    print(run_tool("list_files", path="."))
+    print(run_tool("read_file", path="./README.md"))
+    print(run_tool("write_file", path="./tmp/sandbox_test.txt", content="hello sandbox"))
+    print(run_tool("read_file", path="./tmp/sandbox_test.txt"))
 
-    print(run_tool("calculator", expression="1 + 2 * 4"))
-    print(run_tool("read_file", path="./not_exist.txt"))
-    print(run_tool("write_file", path="./tmp/v5_test.txt", content="hello v5"))
-    print(run_tool("read_file", path="./tmp/v5_test.txt"))
-    print(run_tool("unknown_tool"))
-    print(run_tool("list_files", path="./not_exist_dir"))
+    print("\n越界访问:")
     print(run_tool("list_files", path="../"))
-    
+    print(run_tool("read_file", path="../README.md"))
+    print(run_tool("read_file", path="/etc/passwd"))
+    print(run_tool("write_file", path="../bad.txt", content="bad"))
+
+    print("\n敏感路径:")
+    print(run_tool("read_file", path=".env"))
+    print(run_tool("list_files", path=".git"))
