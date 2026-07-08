@@ -68,5 +68,10 @@ agent 增强 LLM 输出的 Action 提取逻辑，支持中文冒号，支持 Mar
 
 - trace_view.py 脚本快速查看分析运行日志
 
+### V7.2 Agent Trace 日志系统 分析
+
+- trace_stats.py 脚本快速分析运行日志，Agent 行为可度量分析
+
+
 
 
