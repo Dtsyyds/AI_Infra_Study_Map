@@ -180,30 +180,52 @@ class OpenAICompatibleLLM:
         """
         调用真实的 LLM, 返回 Thought / Action 格式的输出
         """
-        completion = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[{
-                "role": "system",
-                "content":(
 
-                    "你是一个严格的 Agent 动作生成器"
-                    "你只能输出 Thought / Action 两行"
-                    "不要输出 Markdown"
-                    "不要输出代码块"
-                    "不要输出额外解释"
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-            ],
-            temperature=0,
-        )
-        content = completion.choices[0].message.content
-        if content is None:
-            return "Thought: 模型没有返回内容\nAction: Finish[模型没有返回内容]"
-        return self._clean_output(content)
+        """
+        V7.3 调用真实 LLM, 返回 Thought / Action 文本
+        增加简单的重试机制：
+        - 如果第一次 API 调用失败，自动再试一次
+        - 如果两次都失败，抛出 RuntimeError, 由 agent.py 捕捉
+        """
+
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content":(
+                                "你是一个严格的 Agent 动作生成器"
+                                "你只能输出 Thought / Action 两行"
+                                "不要输出 Markdown"
+                                "不要输出代码块"
+                                "不要输出额外解释"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    temperature=0,
+                    timeout=30,
+                )
+                
+                content = completion.choices[0].message.content
+
+                if content is None:
+                    return "Thought: 模型没有返回内容\nAction: Finish[模型没有返回内容]"
+                
+                return self._clean_output(content)
+            
+            except Exception as e:
+                last_error = e
+                print(f"[LLM Error] 第 {attempt + 1} 次调用失败：{e}")
+
+        raise RuntimeError(f"真实 LLM 调用失败，已重试两次，最后一次错误：{last_error}")
     
     def _clean_output(self, text: str) -> str:
         """

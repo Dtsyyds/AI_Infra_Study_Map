@@ -72,6 +72,12 @@ agent 增强 LLM 输出的 Action 提取逻辑，支持中文冒号，支持 Mar
 
 - trace_stats.py 脚本快速分析运行日志，Agent 行为可度量分析
 
+### V7.3 解决真实 LLM 调用失败时，Agent 会直接崩溃
+
+LLM API 出错
+-> Agent 不崩溃
+-> Trace 记录错误
+-> 用户看到提示
 
 
 

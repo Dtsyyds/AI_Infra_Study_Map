@@ -178,7 +178,35 @@ class LLMAgent:
             memory_content = task_memory.get_content()
             prompt = build_prompt(user_input, memory_content)
             
-            llm_output = call_llm(prompt)
+            # 适配 7.3 修改
+            try:
+                llm_output = call_llm(prompt)
+            except Exception as e:
+                error_msg = f"LLM 调用失败， 错误原因：{e}"
+
+                result = {
+                    "type": "llm_error",
+                    "content": error_msg,
+                    "success": False,
+                    }
+                
+                trace.add_step(
+                    step_index=step,
+                    llm_output="",
+                    action="",
+                    result=result
+                )
+
+                final_answer = (
+                    "LLM 调用失败，Agent 已停止执行本次任务。\n"
+                    f"错误原因：{e}"
+                )
+
+                trace.finish(final_answer, status="llm_error")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                return final_answer
+
+            # 模型 API 挂了之后，不日再让 Python 程序直接 traceback, 而是把错误包装成一次 Agent 失败结果。
             print("\n[LLM Output]")
             print(llm_output)
 
