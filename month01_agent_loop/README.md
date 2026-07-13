@@ -79,5 +79,26 @@ LLM API 出错
 -> Trace 记录错误
 -> 用户看到提示
 
+### V8.0 Agent Eval 自动化评测集
+
+- 所有关键词都必须出现
+
+### V8.1 Agent Eval 灵活的评测规则
+
+- expected_all: 所有关键词都必须出现
+- expected_any: 任意关键词出现即可
+- forbidden_contains: 包含这些关键词则失败
+
+### V8.2 Agent 执行轨迹评测
+
+- 计算任务是否真的调用了 calculator ？
+- 目录查询是否调用了 list_files ?
+- 读取 .env 时是否没有调用 read_file ?
+- 越界路径是否被阻止 ?
+- 工具是否执行成功 ?
+- Agent 是否用了合理的步骤数 ?
+
+
+
 
 

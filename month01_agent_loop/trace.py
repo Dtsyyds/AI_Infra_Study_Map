@@ -15,6 +15,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+from copy import deepcopy
 
 class AgentTrace:
     def __init__(self, log_dir: str = "month01_agent_loop/logs"):
@@ -73,4 +74,11 @@ class AgentTrace:
 
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(self.data, ensure_ascii=False) + "\n")
- 
+    
+    def snapshot(self) -> Dict[str, Any]:
+        """
+        返回当前 Trace 数据的深拷贝
+
+        Eval 可以安全读取执行轨迹，但不能直接修改 Trace 内部数据
+        """
+        return deepcopy(self.data)

@@ -156,6 +156,8 @@ class LLMAgent:
     def __init__(self, max_steps: int = 3):
         self.memory = Memory(max_messages=50)
         self.max_steps = max_steps
+        # 保存最近一次任务的 trace, 供 eval 使用
+        self.last_trace = None
 
     def run(self, user_input: str) -> str:
         """
@@ -163,6 +165,9 @@ class LLMAgent:
         """
         # Agent trace 记录
         trace = AgentTrace()
+
+        # 保存本次执行轨迹对象
+        self.last_trace = trace
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
         action_history = []
@@ -395,14 +400,20 @@ class LLMAgent:
             return f"Action: Finish[{content}]"
         
         # 再匹配工具调用，一般工具调用都是一行
-        pattern =  r"Action:\s*(\w+\(.*?\))"
-        tool_match = re.search(
-            pattern,
-            text,
-            flags=re.DOTALL
-        )
-        if tool_match:
-            return f"Action: " + tool_match.group(1).strip()
+        # pattern =  r"Action:\s*(\w+\(.*?\))"
+        # tool_match = re.search(
+        #     pattern,
+        #     text,
+        #     flags=re.DOTALL
+        # )
+        # if tool_match:
+        #     return f"Action: " + tool_match.group(1).strip()
+        # 工具调用直接取完整 Action 行
+        for line in text.splitlines():
+            line = line.strip()
+
+            if line.startswith("Action:"):
+                return line
 
         return "Action: Finish[模型没有输出 Action]"
         # # 第一优先级，逐行查找 Action
