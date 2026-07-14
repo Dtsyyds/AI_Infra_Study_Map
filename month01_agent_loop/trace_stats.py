@@ -115,7 +115,7 @@ def analyze_traces(traces: List[Dict[str, Any]]) -> Dict[str, Any]:
         steps = get_steps(trace)
         total_steps += len(steps)
 
-        duration = trace.get("duration_second", None)
+        duration = trace.get("duration_seconds", None)
 
         if isinstance(duration, (int, float)):
             duration_values.append(duration)

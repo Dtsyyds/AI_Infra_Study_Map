@@ -242,7 +242,7 @@ def check_trace(
     forbidden_tools = case.get("forbidden_tools", [])
 
     expected_status = case.get(
-        "excepted_status",
+        "expected_status",
         "success"
     )
 
@@ -380,6 +380,10 @@ def run_eval_case(agent: LLMAgent, case: Dict[str, Any]) -> Dict[str, Any]:
 
         "answer": answer,
         "passed": passed,
+
+        "answer_passed": answer_passed,
+        "trace_passed": trace_passed,
+
         "check_reasons": check_reasons,
         "trace_summary": trace_summary,
 
