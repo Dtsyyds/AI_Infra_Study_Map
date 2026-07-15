@@ -13,6 +13,7 @@ import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from tools import *
 
 load_dotenv()
 
@@ -27,9 +28,35 @@ class FakerLLM:
 
         last_observation = self._extract_last_observation(prompt)
         if last_observation:
+            if last_observation.startswith("TOOL_OK:"):
+                content = last_observation.removeprefix(
+                    "TOOL_OK:"
+                ).strip()
+
+                if self._is_list_files_task(user_input):
+                    return (
+                        "Thought: 工具已经成功执行，我需要整理成自然语言回答\n"
+                        f'Action: Finish[当前目录包含以下文件和文件夹：{content}]'
+                    )
+                return (
+                    "Thought: 工具已经成功执行，我应该整理成自然语言回答\n"
+                    f"Action: Finish[工具执行结果是：{content}]"
+                )
+
+            if last_observation.startswith("TOOL_ERROR:"):
+                error = last_observation.removeprefix(
+                    "TOOL_ERROR:"
+                ).strip()
+
+                return (
+                    "Thought: 工具执行失败，我应该解释原因并给出检查建议\n"
+                    f"Action: Finish[工具执行失败，请检查：{error}]"
+                )
+
+            # 兼容没有 TOOL_OK/TOOL_ERROR 前缀的 Observation
             return (
-                "Thought: 我已经拿到了工具返回的观察结果，可以基于它给出最终答案\n"
-                f'Action: Finish[{last_observation}]'
+                "Thought: 我已经拿到了工具返回结果，可以给出最终答案\n"
+                f"Action: Finish[工具执行结果是：{last_observation}]"
             )
         
         if self._is_calculate_task(user_input):
@@ -40,6 +67,12 @@ class FakerLLM:
                 f'Action: calculator(expression="{expression}")'
             )
         
+        if self._is_list_files_task(user_input):
+            return (
+                "Thought: 用户需要查看当前目录，我应该调用 list_files 工具\n"
+                'Action: list_files(path=".")' 
+            )
+        
         if user_input.startswith("读取"):
             path = user_input.replace("读取", "", 1).strip()
 
@@ -47,6 +80,19 @@ class FakerLLM:
             for suffix in ["文件内容", "的内容", "内容", "文件"]:
                 path = path.replace(suffix, "").strip()
 
+            # 增加第一层防护：敏感文件在调用前拒绝
+            if is_sensitive_path(path):
+                return (
+                    "Thought: 用户需要读取文件内容, 但该文件敏感，拒绝执行\n"
+                    f'Action: Finish[出于安全考虑，{path} 属于敏感路径，不能读取]'
+                )
+            
+            # 项目目录外路径在工具调用前拒绝
+            if self._is_workspace_boundary_path(path):
+                return (
+                    "Thought: 用户需要读取文件内容, 但该路径不属于项目目录，拒绝执行\n"
+                    "Action: Finish[无法读取：该路径超出项目目录的访问范围]"
+                )
             return (
                 "Thought: 用户需要读取文件内容, 我应该调用 read_file 工具\n"
                 f'Action: read_file(path="{path}")'
@@ -60,6 +106,8 @@ class FakerLLM:
                 "Thought: 用户需要写入文件内容, 我应该调用 write_file 工具\n"
                 f'Action: write_file(path="{path}", content="{content}")'
             )
+        
+
         
         return (
             "Thought: 当前任务不需要调用工具，或者 FakerLLM 暂时无法识别用户意图\n"
@@ -76,7 +124,18 @@ class FakerLLM:
             用户输入的内容
         """
 
-        match = re.search(r"用户输入:\n(.*)", prompt);
+        # 解决问题1：prompts.py 生成用户输入时用的是中文冒号，这里替换为英文
+        # prompt = prompt.replace("：", ":")
+
+        # match = re.search(r"用户输入:\n(.*)", prompt);
+        match = re.search(
+            r"用户输入[:：]\s*\n(.*?)(?=\n\n请输出 Thought 和 Action|\Z)",
+            prompt,
+            flags=re.DOTALL
+        )
+        """
+        从 prompt 字符串中提取紧跟在“用户输入:”或“用户输入：”之后（允许冒号后有空白和换行）的一大段内容，直到遇到下一个 \n\n请输出 Thought 和 Action 或字符串结尾为止。
+        """
         if match:
             return match.group(1)
         return ""
@@ -93,13 +152,42 @@ class FakerLLM:
         Returns:
             最后一次的 observation
         """
-        matches = re.findall(r"observation:\s*(.*)", prompt)
+
+        """
+        提取最后一次完整的 Observation。
+
+        支持：
+        - 单行 Observation
+        - 多行文件列表
+        - 多轮 Observation
+        """
+
+        pattern = (
+            r"^observation:\s*(.*?)"
+            r"(?="
+            r"^(?:user|assistant|observation|system):"
+            r"|^用户输入[：:]"
+            r"|\Z"
+            r")"
+        )
+
+        matches = re.findall(
+            pattern,
+            prompt,
+            flags=re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        )
+
         if not matches:
-            matches = re.findall(r"Observation:\s*(.*)", prompt)
-        if matches:
-            return matches[-1].strip()
-        else:
             return ""
+
+        return matches[-1].strip()
+        # matches = re.findall(r"observation:\s*(.*)", prompt)
+        # if not matches:
+        #     matches = re.findall(r"Observation:\s*(.*)", prompt)
+        # if matches:
+        #     return matches[-1].strip()
+        # else:
+        #     return ""
             
     
     def _is_calculate_task(self, user_input: str) -> bool:
@@ -131,6 +219,29 @@ class FakerLLM:
         
         return user_input.replace("计算", "", 1).strip()
     
+    def _is_list_files_task(self, user_input: str) -> bool:
+        """
+        判断用户输入是否是查看当前目录的任务
+        """
+        keywords = [
+            "查看当前目录", "列出文件", "显示所有文件和文件夹",
+            "列出当前目录下的内容", "展示当前目录的文件列表", 
+            "请列出当前目录中的所有项目或文件"
+        ]
+        return any(
+            keyword in user_input for keyword in keywords
+        )
+    
+    def _is_workspace_boundary_path(self, path: str) -> bool:
+        normalized_path = os.path.normpath(path)
+
+        return (
+            os.path.isabs(path)
+            or path.startswith("~")
+            or normalized_path == ".."
+            or normalized_path.startswith(".." + os.sep)
+        )
+
 class OpenAICompatibleLLM:
     """
     真实 OpenAI-compatible LLM 调用
