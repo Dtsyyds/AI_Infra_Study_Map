@@ -71,16 +71,22 @@ def resolve_workspace_path(path: str) -> tuple[bool, str, str]:
     
     # 如果是绝对路径，直接标准化
     if os.path.isabs(path):
-        abs_path = os.path.abspath(path)
+        abs_path = os.path.realpath(path)
     else:
-        abs_path = os.path.abspath(os.path.join(WORKSPACE_ROOT, path))
+        abs_path = os.path.realpath(os.path.join(WORKSPACE_ROOT, path))
 
     # 判断是否仍在 workspace 内
     if abs_path != WORKSPACE_ROOT and not abs_path.startswith(WORKSPACE_ROOT + os.sep):
         return False, "", f"路径越界：只能访问项目目录内部：{path}"
     
     return True, abs_path, ""
+"""
+abspath() 和 realpath() 的区别
 
+假设 /workspace/link.txt 是符号链接，指向 /etc/passwd
+使用 abspath() 会得到 /workspace/link.txt 它只做字符串层面的处理，消除 . 处理 .. 不跟踪符号链接
+使用 realpath() 会得到 /etc/passwd 它会继续解析符号链接，得到操作系统最终访问的真实路径。
+"""
 def to_workspace_display_path(abs_path: str) -> str:
     """
     将绝对路径转换成相对 workspace 的展示路径，避免把本机的绝对路径暴露给 LLM。
@@ -290,7 +296,7 @@ def write_file(path: str, content: str) -> str:
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
         
-        with open(path, "w") as f:
+        with open(abs_path, "w") as f:
             # return tool_ok(str(f.write(content)))  # 返回写入的字符数
             f.write(content)
         return tool_ok(f"写入成功: {display_path}") 
