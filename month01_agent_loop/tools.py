@@ -69,15 +69,38 @@ def resolve_workspace_path(path: str) -> tuple[bool, str, str]:
     if path.startswith("~"):
         return False, "", f"路径越界：不允许使用用户主目录路径：{path}"
     
-    # 如果是绝对路径，直接标准化
-    if os.path.isabs(path):
-        abs_path = os.path.realpath(path)
-    else:
-        abs_path = os.path.realpath(os.path.join(WORKSPACE_ROOT, path))
+    # # 如果是绝对路径，直接标准化
+    # if os.path.isabs(path):
+    #     abs_path = os.path.realpath(path)
+    # else:
+    #     abs_path = os.path.realpath(os.path.join(WORKSPACE_ROOT, path))
 
-    # 判断是否仍在 workspace 内
-    if abs_path != WORKSPACE_ROOT and not abs_path.startswith(WORKSPACE_ROOT + os.sep):
-        return False, "", f"路径越界：只能访问项目目录内部：{path}"
+    # 不要只规范化候选路径，先规范候选路径
+    workspace_root = os.path.realpath(WORKSPACE_ROOT)
+
+    if os.path.isabs(path):
+        candidate_path = path
+    else:
+        candidate_path = os.path.join(WORKSPACE_ROOT, path)
+
+    abs_path = os.path.realpath(candidate_path)
+
+    # # 判断是否仍在 workspace 内
+    # if abs_path != WORKSPACE_ROOT and not abs_path.startswith(WORKSPACE_ROOT + os.sep):
+    #     return False, "", f"路径越界：只能访问项目目录内部：{path}"
+    # 使用路径语义判断
+    try:
+        inside_workspace = (
+            os.path.commonpath([workspace_root, abs_path])
+            ==workspace_root
+        )
+    except ValueError:
+        inside_workspace = False
+
+    if not inside_workspace:
+        return False, "", (
+            f"路径越界：只能访问项目目录内部：{path}"
+        )
     
     return True, abs_path, ""
 """
@@ -91,7 +114,9 @@ def to_workspace_display_path(abs_path: str) -> str:
     """
     将绝对路径转换成相对 workspace 的展示路径，避免把本机的绝对路径暴露给 LLM。
     """
-    rel_path = os.path.relpath(abs_path, WORKSPACE_ROOT)
+    workspace_root = os.path.realpath(WORKSPACE_ROOT)
+    real_abs_path = os.path.realpath(abs_path)
+    rel_path = os.path.relpath(real_abs_path, workspace_root)
 
     if rel_path == '.':
         return '.'
@@ -234,7 +259,10 @@ def list_files(path: str, show_hidden: str="false") -> str:
         for file in sorted(files):
             full_path = os.path.join(abs_path, file)
 
-            if is_hidden_name(file) or is_sensitive_path(full_path):
+            if is_sensitive_path(full_path):
+                continue
+
+            if is_hidden_name(file):
                 hidden_mark += 1
                 if not show_hidden_bool:
                     continue

@@ -16,6 +16,7 @@ test_read_file_rejects_symlink_escape:防止“路径遍历攻击”——禁止
 
 """
 import tools
+import os
 
 def test_read_file_rejects_symlink_escape(tmp_path, monkeypatch):
     # 创建临时 workspace
@@ -43,7 +44,7 @@ def test_read_file_rejects_symlink_escape(tmp_path, monkeypatch):
 
     # Assert：不能通过符号链接读取外部内容
     assert result.startswith("TOOL_ERROR:")
-    assert "outside secret" not in result
+    assert "outside content" not in result
 
 def test_write_file_uses_validated_workspace_path(tmp_path, monkeypatch):
     # Arrange
@@ -80,3 +81,129 @@ def test_write_file_uses_validated_workspace_path(tmp_path, monkeypatch):
 
     # 原始相对路径不能写到当前工作目录
     assert not wrong_file.exists()
+
+def test_read_file_allows_normal_workspace_file(tmp_path, monkeypatch):
+    # 创建临时 workspace
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 创建 workspace 内部文件
+    inside_file = workspace / "safe.txt"
+    inside_file.write_text("inside content")
+
+    monkeypatch.setattr(
+        tools,
+        "WORKSPACE_ROOT",
+        str(workspace),
+    )
+
+    # 模拟程序从 workspace 外启动
+    # monkeypatch.chdir(inside_file)  # i是一个文件，不能作为当前目录
+
+    # 测试 read_file 是否可以正常读取 workspace 内文件
+    result = tools.read_file("safe.txt")
+
+    assert result.startswith("TOOL_OK:")
+    
+    assert "inside content" in result
+
+def test_read_file_allows_symlinked_workspace_root(tmp_path, monkeypatch):
+    # 创建临时 workspace
+    real_workspace = tmp_path / "real_workspace"
+    real_workspace.mkdir()
+
+    # 创建内部文件
+    inside_file = real_workspace / "safe.txt"
+    inside_file.write_text("inside content")
+
+    workspace_link = tmp_path / "workspace_link"
+
+    workspace_link.symlink_to(
+        real_workspace,
+        target_is_directory=True,
+    )
+
+    monkeypatch.setattr(
+        tools,
+        "WORKSPACE_ROOT",
+        str(workspace_link),
+    )
+
+    # 模拟程序从 workspace 外启动
+
+    result = tools.read_file("safe.txt")    # 直接读不需要再额外创建文件链接
+
+    # print("lexical root:", tools.WORKSPACE_ROOT)
+    # print(
+    #     "canonical root:",
+    #     os.path.realpath(tools.WORKSPACE_ROOT),
+    # )
+    # print(
+    #     "canonical candidate:",
+    #     os.path.realpath(
+    #         os.path.join(tools.WORKSPACE_ROOT, "safe.txt")
+    #     ),
+    # )
+
+    assert result.startswith("TOOL_OK:")
+    assert "inside content" in result
+
+def test_write_file_rejects_symlink_escape(tmp_path, monkeypatch):
+    # 创建临时 workspace
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 创建 workspace 外部文件
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside content")
+
+    # 在 workspace 内部创建指向外部文件的符号链接
+    link_path = workspace / "link.txt"
+    link_path.symlink_to(outside_file)  # 指向外面的 outside.txt 文件
+
+    monkeypatch.setattr(
+        tools,
+        "WORKSPACE_ROOT",
+        str(workspace),
+    )
+
+    result = tools.write_file(str(link_path), "attacked")
+
+    assert result.startswith("TOOL_ERROR:")
+    assert outside_file.read_text(
+        encoding="utf-8"
+    ) == "outside content"
+    # 安全测试不能只检查错误信息，还必须检测被保护资源没有修改
+
+def test_list_files_never_exposes_sensitive_file(tmp_path, monkeypatch):
+    # 创建临时 workspace
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # 在 workspace 内部创建文件
+    inside_file = workspace / "visible.txt"
+    env_file = workspace / ".env"
+    hidden_file = workspace / ".notes"
+    hidden_file.write_text(
+        "normal hidden file",
+        encoding="utf-8",
+    )
+
+    inside_file.write_text("inside content")
+    env_file.write_text("sensitive data")
+
+    monkeypatch.setattr(
+        tools,
+        "WORKSPACE_ROOT",
+        str(workspace),
+    )
+
+    result = tools.list_files(".", show_hidden="true")
+
+    assert result.startswith("TOOL_OK:")
+    assert "visible.txt" in result
+    assert ".env" not in result
+    assert ".notes" in result
+    assert ".env" not in result
+
+
