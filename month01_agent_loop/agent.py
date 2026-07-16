@@ -281,7 +281,7 @@ class LLMAgent:
                 final_answer = f"执行失败，错误原因：{error_msg}"
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
-                trace.fail(error_msg, status="error")
+                trace.fail(error_msg)
                 return final_answer
         
         final_answer = "任务超过最大执行步骤，无法继续执行。"

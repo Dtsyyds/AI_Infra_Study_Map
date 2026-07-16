@@ -339,11 +339,18 @@ def run_eval_case(agent: LLMAgent, case: Dict[str, Any]) -> Dict[str, Any]:
 
     trace_data: Dict[str, Any] = {}
 
-    if agent.last_trace is not None:
-        trace_data = agent.last_trace.snapshot()
-
+    if agent is not None and hasattr(agent, 'last_trace'):
+        trace = agent.last_trace
+        if trace is not None and hasattr(trace, 'snapshot'):
+            try:
+                trace_data = trace.snapshot()
+            except Exception as e:
+                # 记录日志或处理异常
+                trace_data = {}
     
     passed = False
+    answer_passed = False
+    trace_passed = False
     check_reasons = []
 
     if error is None:
@@ -366,7 +373,7 @@ def run_eval_case(agent: LLMAgent, case: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "id": case_id,
-        "input": user_input,\
+        "input": user_input,
         "description": case.get("description", ""),
 
         "expected_all": expected_all,
@@ -375,7 +382,7 @@ def run_eval_case(agent: LLMAgent, case: Dict[str, Any]) -> Dict[str, Any]:
 
         "expected_tools": case.get("expected_tools", []),
         "forbidden_tools": case.get("forbidden_tools", []),
-        "excepted_status": case.get("expected_status", "success"),
+        "expected_status": case.get("expected_status", "success"),
         "max_steps": case.get("max_steps"),
 
         "answer": answer,

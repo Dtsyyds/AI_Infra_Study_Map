@@ -66,7 +66,7 @@ class AgentTrace:
         self.data["status"] = "failed"
         self.data["error"] = error
         self.data["end_time"] = end_dt.isoformat(timespec="seconds")
-        self.data["duration"] = round((end_dt - self._start_dt).total_seconds(), 3)
+        self.data["duration_seconds"] = round((end_dt - self._start_dt).total_seconds(), 3)
         self._save()
 
     def _save(self) -> None:
