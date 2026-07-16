@@ -72,6 +72,3 @@ def test_trace_fail_uses_consistent_schema(tmp_path):
     log_file = tmp_path / "agent_trace.jsonl"
     assert log_file.exists()
 
-if __name__ == "__main__":
-    test_run_eval_case_handles_agent_exception()
-    test_trace_fail_uses_consistent_schema(tmp_path)
