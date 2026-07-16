@@ -1,7 +1,7 @@
 """
 test_sandbox_security.py
 
-测试文件沙盒安全性
+测试文件沙盒安全性, 主要是为了测试 read_file 和 write_file 这两个工具函数的安全性。
 """
 
 """
