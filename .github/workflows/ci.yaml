@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: Ubuntu 24.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     defaults:
@@ -23,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: 3.11
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: month01_agent_loop/requirements-dev.txt
 
@@ -33,12 +33,12 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Check Python syntax
-        run: compileall
+        run: python -m compileall -q .
 
       - name: Run unit tests
-        run: pytest
+        run: python -m pytest -q
 
       - name: Run deterministic stability evaluation
         env:
           LLM_MODE: fake
-        run: eval_stability.py
+        run: python eval_stability.py
