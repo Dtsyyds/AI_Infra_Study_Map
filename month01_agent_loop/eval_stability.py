@@ -381,7 +381,17 @@ def build_stability_summary(cases, results):
         ],
     }
 
-def main():
+def determine_exit_code(summary: dict) -> int:
+    """
+    根据稳定性测评摘要决定进程退出码
+
+    所有运行结果均为通过时，退出码为0
+    否则，退出码为1
+    """
+    return 0 if summary["failed_runs"] == 0 else 1
+
+
+def main() -> int:
     cases = load_eval_cases()
 
     runs = 2
@@ -420,6 +430,8 @@ def main():
             "主要失败类型: "
             f"{case_summary['primary_failure_types']}"
         )
+
+    return determine_exit_code(summary)
 
 if __name__ == "__main__":
     main()
