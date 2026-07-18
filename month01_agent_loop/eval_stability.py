@@ -45,6 +45,8 @@ from eval import (
     run_eval_case,
 )
 
+import sys
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 RESULT_DIR = os.path.join(BASE_DIR, "eval_results")
@@ -434,4 +436,4 @@ def main() -> int:
     return determine_exit_code(summary)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
