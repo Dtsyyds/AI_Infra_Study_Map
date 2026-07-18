@@ -2,9 +2,8 @@
 test_sandbox_security.py
 
 测试文件沙盒安全性, 主要是为了测试 read_file 和 write_file 这两个工具函数的安全性。
-"""
 
-"""
+
 代码中出现了 tmp_path 和 monkeypatch，这是 pytest 提供的强大功能：
 
 tmp_path：pytest 内置夹具，会在每次测试运行时自动创建一个临时目录，测试结束后自动删除。这保证了测试的隔离性，不会弄脏你的真实文件系统。
@@ -15,8 +14,9 @@ test_read_file_rejects_symlink_escape:防止“路径遍历攻击”——禁止
 
 
 """
+
 import tools
-import os
+
 
 def test_read_file_rejects_symlink_escape(tmp_path, monkeypatch):
     # 创建临时 workspace

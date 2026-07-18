@@ -12,11 +12,11 @@ Agent 自动化测评脚本
 这是 Agent Eval 的最小实现版本
 """
 
+import json
 import os
 import re
-import json
 import time
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent import LLMAgent
 
@@ -344,7 +344,7 @@ def run_eval_case(agent: LLMAgent, case: Dict[str, Any]) -> Dict[str, Any]:
         if trace is not None and hasattr(trace, 'snapshot'):
             try:
                 trace_data = trace.snapshot()
-            except Exception as e:
+            except Exception:
                 # 记录日志或处理异常
                 trace_data = {}
     

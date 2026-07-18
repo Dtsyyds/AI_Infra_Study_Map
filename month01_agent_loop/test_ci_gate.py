@@ -5,6 +5,7 @@ test_ci_gate.py
 """
 from eval_stability import determine_exit_code
 
+
 def test_ci_gate_returns_zero_when_all_runs_pass():
     summary = {"failed_runs": 0}
     assert determine_exit_code(summary) == 0

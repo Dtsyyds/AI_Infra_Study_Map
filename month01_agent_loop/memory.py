@@ -16,7 +16,8 @@ memory.py
 - 后续可以升级为摘要记忆、长期记忆、向量数据库记忆
 """
 
-from typing import List, Dict
+from typing import Dict, List
+
 
 class Memory:
     """

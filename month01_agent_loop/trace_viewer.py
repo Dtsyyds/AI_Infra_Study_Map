@@ -9,10 +9,10 @@ Agent Trace 查看工具
 3. 用于学习 Agent 行为复盘和后续 LLMOps 分析
 """
 
-import os
-import json
 import argparse
-from typing import List, Dict, Any
+import json
+import os
+from typing import Any, Dict, List
 
 LOG_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -72,6 +72,7 @@ def print_summary(traces: List[Dict[str, Any]], last: int = 5) -> None:
 
         print(f"{index}. trace_id: {trace_id}")
         print(f"   start_time: {start_time}")
+        print(f"   end_time: {end_time}")
         print(f"   status: {status}")
         print(f"   steps: {len(steps)}")
 

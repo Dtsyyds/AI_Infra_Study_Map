@@ -4,7 +4,8 @@ main.py
 V0 规则版 Agent 的命令行入口
 
 """
-from agent import RuleBaseAgent, LLMAgent
+from agent import LLMAgent
+
 
 def main():
     # agent = RuleBaseAgent()

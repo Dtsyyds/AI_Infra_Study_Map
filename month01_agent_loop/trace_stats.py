@@ -10,11 +10,11 @@ Agent Trace 统计分析工具
 4. 为后续 Agent Eval / AgentOps 做准备
 """
 
-import os
 import json
+import os
 import re
-from typing import List, Dict, Any
 from collections import Counter
+from typing import Any, Dict, List
 
 LOG_PATH = os.path.join(
     os.path.dirname(__file__),

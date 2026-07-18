@@ -15,14 +15,14 @@ parser.py
 """
 import re
 
-cal_text = f"Action: calculator(expression=\"1 + 2 * 4\")"
-read_text = f"Action: read_file(path=\"./README.md\")"
-write_text = f"Action: write_file(path=\"./test.txt\", content=\"hello world!\")"
-finish_text = f"Action: Finish[任务完成]"
+cal_text = "Action: calculator(expression=\"1 + 2 * 4\")"
+read_text = "Action: read_file(path=\"./README.md\")"
+write_text = "Action: write_file(path=\"./test.txt\", content=\"hello world!\")"
+finish_text = "Action: Finish[任务完成]"
 
 def parse_tools(input: str) -> str:
     if not input.startswith("Action:"):
-        return f"Action判断不是有效的调用工具指令"
+        return "Action判断不是有效的调用工具指令"
 
     pattern_text = r"Action:\s*(\w+)\((.*)\)"
     # Action  匹配固定字符串 Action:
@@ -34,7 +34,7 @@ def parse_tools(input: str) -> str:
     match = re.search(pattern_text, input)
 
     if not match:
-        return f"不是有效的调用工具指令"
+        return "不是有效的调用工具指令"
     tool_name = match.group(1)
     args_text = match.group(2)
     print(f"调用的工具是：{tool_name} 传入的参数是：{args_text}")
@@ -58,7 +58,7 @@ def parse_tools(input: str) -> str:
 
 def parse_Finish(input: str) -> str:
     if not input.startswith("Action:"):
-        return f"Action判断不是有效的调用工具指令"
+        return "Action判断不是有效的调用工具指令"
     pattern_text = r"Action:\s*(\w+)\[(.*)\]"
     # Action  匹配固定字符串 Action:
     # \s* 匹配任意空格
@@ -68,7 +68,7 @@ def parse_Finish(input: str) -> str:
     # \) 匹配右括号
     match = re.search(pattern_text, input, flags=re.DOTALL)
     if not match:
-        return f"不是有效的结束指令"
+        return "不是有效的结束指令"
     Finish_text = match.group(1)
     args_text = match.group(2)
 
@@ -129,7 +129,7 @@ def parse_action(input: str) -> dict:
     if not text.startswith("Action:"):
         return {
             "type": "error",
-            "content": f"不是有效的 Action 指令"
+            "content": "不是有效的 Action 指令"
         }
     
     # 去掉前面的 action

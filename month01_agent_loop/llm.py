@@ -13,7 +13,8 @@ import re
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from tools import *
+
+from tools import is_sensitive_path
 
 load_dotenv()
 

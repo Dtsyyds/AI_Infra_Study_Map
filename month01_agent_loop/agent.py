@@ -18,13 +18,14 @@ V0 版本 Agent
 - 写入： 写入 ./text.txt hello agent
 """
 
-from memory import Memory
-from executor import execute_action
-from memory import Memory
-from prompts import build_prompt
-from llm import *
 import re
 from trace import AgentTrace
+
+from executor import execute_action
+from llm import call_llm
+from memory import Memory
+from prompts import build_prompt
+
 
 class RuleBaseAgent:
     """
@@ -52,14 +53,14 @@ class RuleBaseAgent:
         # 1. 计算
         if user_input.startswith('计算'):
             expression = user_input.replace("计算", "", 1).strip()      # 将 "计算" 替换为空字符串，并去掉首尾空白字符
-            thought = f"Thought: 用户需要计算数学表达式，我应该调用 calculator 工具。"
+            thought = "Thought: 用户需要计算数学表达式，我应该调用 calculator 工具。"
             action = f'Action: calculator(expression="{expression}")'
             return thought, action
         
         # 2. 读取文件
         if user_input.startswith("读取"):
             expression = user_input.replace("读取", "", 1).strip()
-            thought = f"Thought: 用户需要读取文件内容，我应该调用 reader 工具。"
+            thought = "Thought: 用户需要读取文件内容，我应该调用 reader 工具。"
             action = f'Action: read_file(path="{expression}")'
             return thought, action
         
@@ -68,19 +69,19 @@ class RuleBaseAgent:
             expression = user_input.replace("写入", "", 1).strip()
             parts = expression.split(maxsplit=1)
             if len(parts) < 2:
-                thought = f"Thought: 用户输入了无效的命令，我应该告诉他怎么做。"
-                action = f'Action: say("请输入有效的命令")'
+                thought = "Thought: 用户输入了无效的命令，我应该告诉他怎么做。"
+                action = 'Action: say("请输入有效的命令")'
                 return thought, action
             path = parts[0]
             content = parts[1]
-            thought = f"Thought: 用户需要写入文件内容，我应该调用 writer 工具。"
+            thought = "Thought: 用户需要写入文件内容，我应该调用 writer 工具。"
             action = f'Action: write_file(path="{path}", content="{content}")'
             return thought, action
         
         # 4. 其他情况
         else:
-            thought = f"Thought: 用户输入了无效的命令，我应该告诉他怎么做。"
-            action = f'Action: say("请输入有效的命令")'
+            thought = "Thought: 用户输入了无效的命令，我应该告诉他怎么做。"
+            action = 'Action: say("请输入有效的命令")'
             return thought, action
         
     def run(self, user_input: str) -> str:

@@ -3,8 +3,10 @@ test_error_paths.py
 
 测试抛出异常情况下 trace 能否正确捕获，以及 Agent 的处理方案
 """
-from eval import run_eval_case
 from trace import AgentTrace
+
+from eval import run_eval_case
+
 
 class ThrowingAgent:
     """

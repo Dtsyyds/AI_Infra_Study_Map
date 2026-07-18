@@ -10,12 +10,13 @@ Agent 执行轨迹日志模块
 4. 保存为 JSONL，方便后续分析和评估
 """
 
+import json
 import os
-import json 
 import uuid
-from datetime import datetime
-from typing import Dict, Any, List, Optional
 from copy import deepcopy
+from datetime import datetime
+from typing import Any, Dict
+
 
 class AgentTrace:
     def __init__(self, log_dir: str = "month01_agent_loop/logs"):
