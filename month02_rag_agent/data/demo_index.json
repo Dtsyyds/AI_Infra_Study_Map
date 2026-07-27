@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "model": "demo-embedding-model",
+  "dimension": 2,
+  "normalized": false,
+  "records": [
+    {
+      "id": "docs/sandbox.md::chunk_0000",
+      "text": "第一段",
+      "embedding": [
+        0.1,
+        0.2
+      ],
+      "metadata": {
+        "source": "docs/sandbox.md",
+        "chunk_index": 0
+      }
+    },
+    {
+      "id": "docs/sandbox.md::chunk_0001",
+      "text": "第二段",
+      "embedding": [
+        0.3,
+        0.4
+      ],
+      "metadata": {
+        "source": "docs/sandbox.md",
+        "chunk_index": 1
+      }
+    }
+  ]
+}
