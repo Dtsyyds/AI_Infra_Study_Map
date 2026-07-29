@@ -101,3 +101,19 @@ def test_search_dimension_mismatch():
 
     with pytest.raises(ValueError):
         search([1, 0], records, top_k=1)
+
+def test_search_filters_by_min_score():
+    result = search([0.2, 0.95, 0.0, 0.0], RECORDS, top_k=3, min_score=0.5)
+
+    assert len(result) == 1
+    assert result[0]["id"] == "sandbox"
+
+def test_search_returns_empty_when_all_scores_below_threshold():
+    result = search([0.2, 0.95, 0.0, 0.0], RECORDS, top_k=3, min_score=1.0)
+
+    assert len(result) == 0
+
+@pytest.mark.parametrize("min_score", [-1.1, 1.1, "0.5"])
+def test_search_rejects_invalid_min_score(min_score):
+    with pytest.raises(ValueError):
+        search([0.2, 0.95, 0.0, 0.0], RECORDS, top_k=3, min_score=min_score)

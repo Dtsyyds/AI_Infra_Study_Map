@@ -8,7 +8,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import Dict
 from month01_agent_loop.tools import resolve_workspace_path
 
 # 当前项目根目录：AI_Infra_Study_Map
@@ -49,7 +48,7 @@ def load_text_file(path: str) -> dict:
         
         if not abs_path:
             # return f"读取失败: path 不能为空"
-            raise ValueError(f"读取失败: path 不能为空")
+            raise ValueError("读取失败: path 不能为空")
         
         if not os.path.exists(abs_path):
             # return f"读取失败: 文件不存在: {abs_path}"
@@ -59,7 +58,7 @@ def load_text_file(path: str) -> dict:
             # return f"读取失败：当前路径是目录，不是文件: {abs_path}"
             raise ValueError(f"读取失败：当前路径是目录，不是文件: {abs_path}")
         
-        if not os.path.splitext(abs_path)[1] in AVAILABLE_FILE:
+        if os.path.splitext(abs_path)[1] not in AVAILABLE_FILE:
             # return f"读取失败：不支持的文件类型: {abs_path}"
             raise ValueError(f"读取失败：不支持的文件类型: {abs_path}")
         

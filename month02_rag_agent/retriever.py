@@ -3,7 +3,6 @@ retriever.py
 
 实现余弦相似度
 """
-
 from collections.abc import Sequence
 
 def cosine_similarity(vector_a: Sequence[float], vector_b: Sequence[float],) -> float:
@@ -21,7 +20,7 @@ def cosine_similarity(vector_a: Sequence[float], vector_b: Sequence[float],) -> 
         raise ValueError("向量的模不能为0")
     return dot_product / (magnitude_a * magnitude_b)
 
-def search(query_vector: Sequence[float], records: list[dict], top_k: int = 3) -> list[dict]:
+def search(query_vector: Sequence[float], records: list[dict], top_k: int = 3, min_score=None) -> list[dict]:
     """
     根据查询向量，在记录中搜索最相似的 top_k 条记录
     
@@ -34,6 +33,12 @@ def search(query_vector: Sequence[float], records: list[dict], top_k: int = 3) -
     """
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
+
+    if min_score is not None:
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise ValueError("min_score 必须是数字")
+        if min_score < 0 or min_score > 1:
+            raise ValueError("min_score 的值必须在 [0, 1] 之间")
     
     if not records:
         return []
@@ -41,6 +46,8 @@ def search(query_vector: Sequence[float], records: list[dict], top_k: int = 3) -
     scores = []
     for record in records:
         similarity = cosine_similarity(query_vector, record['embedding'])
+        if min_score is not None and similarity < min_score:
+            continue
         scores.append((record, similarity))
     scores.sort(key=lambda x: x[1], reverse=True)
 
