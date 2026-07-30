@@ -89,6 +89,7 @@ def create_demo_index(index_path: Path) -> None:
         ],
         source="docs/demo_agent_infra.md",
         model_name=DEMO_MODEL_NAME,
+        normalized=True,
     )
 
     save_index(index, index_path)

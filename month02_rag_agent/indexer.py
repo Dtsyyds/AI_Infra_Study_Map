@@ -65,6 +65,7 @@ def build_index(
     embeddings: list[list[float]],
     source: str,
     model_name: str,
+    normalized: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(model_name, str) or not model_name.strip():
         raise ValueError("model_name 不能为空")
@@ -75,7 +76,7 @@ def build_index(
         "schema_version": SCHEMA_VERSION,
         "model": model_name,
         "dimension": len(embeddings[0]),
-        "normalized": False,
+        "normalized": normalized,
         "records": records,
     }
 
