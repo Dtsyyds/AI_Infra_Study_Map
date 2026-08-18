@@ -40,55 +40,46 @@ def load_text_file(path: str) -> dict:
     """
     if not isinstance(path, str) or not path.strip():
         raise ValueError("path 不能为空")
-    try:
-        ok, abs_path, error = resolve_workspace_path(path)
-        if not ok:
-            # return f"读取失败：{error}"
-            raise ValueError(f"读取失败：{error}")
-        
-        if not abs_path:
-            # return f"读取失败: path 不能为空"
-            raise ValueError("读取失败: path 不能为空")
-        
-        if not os.path.exists(abs_path):
-            # return f"读取失败: 文件不存在: {abs_path}"
-            raise ValueError(f"读取失败: 文件不存在: {abs_path}")
-        
-        if os.path.isdir(abs_path):
-            # return f"读取失败：当前路径是目录，不是文件: {abs_path}"
-            raise ValueError(f"读取失败：当前路径是目录，不是文件: {abs_path}")
-        
-        if os.path.splitext(abs_path)[1] not in AVAILABLE_FILE:
-            # return f"读取失败：不支持的文件类型: {abs_path}"
-            raise ValueError(f"读取失败：不支持的文件类型: {abs_path}")
-        
-        with open(abs_path, "r", encoding="utf-8") as f:
-            text = f.read()
-            if not text:
-                # return f"读取失败：文件内容为空: {abs_path}"
-                raise ValueError(f"读取失败：文件内容为空: {abs_path}")
-        relative_path = os.path.relpath(abs_path, WORKSPACE_ROOT)
-        """
-        假设:
-            WORKSPACE_ROOT=/home/dts/AI_Infra_Study_Map
-        结果是:
-            {
-                "source": "month02_rag_agent/docs/agent_infra.md",
-                "filename": "agent_infra.md",
-            }
-        """
-        return {
-            "text": text,
-            "metadata": {
-                "source_path": relative_path.replace(os.sep, "/"),
-                "file_name": os.path.basename(abs_path),
-            }
+    ok, abs_path, error = resolve_workspace_path(path)
+    if not ok:
+        # return f"读取失败：{error}"
+        raise ValueError(f"读取失败：{error}")
+    if not abs_path:
+        # return f"读取失败: path 不能为空"
+        raise ValueError("读取失败: path 不能为空")
+    if not os.path.exists(abs_path):
+        # return f"读取失败: 文件不存在: {abs_path}"
+        raise FileNotFoundError(f"读取失败: 文件不存在: {abs_path}")
+    if os.path.isdir(abs_path):
+        # return f"读取失败：当前路径是目录，不是文件: {abs_path}"
+        raise IsADirectoryError(f"读取失败：当前路径是目录，不是文件: {abs_path}")
+    if os.path.splitext(abs_path)[1] not in AVAILABLE_FILE:
+        # return f"读取失败：不支持的文件类型: {abs_path}"
+        raise ValueError(f"读取失败：不支持的文件类型: {abs_path}")
+    
+    with open(abs_path, "r", encoding="utf-8") as f:
+        text = f.read()
+        if not text:
+            # return f"读取失败：文件内容为空: {abs_path}"
+            raise ValueError(f"读取失败：文件内容为空: {abs_path}")
+    relative_path = os.path.relpath(abs_path, WORKSPACE_ROOT)
+    """
+    假设:
+        WORKSPACE_ROOT=/home/dts/AI_Infra_Study_Map
+    结果是:
+        {
+            "source": "month02_rag_agent/docs/agent_infra.md",
+            "filename": "agent_infra.md",
         }
+    """
+    return {
+        "text": text,
+        "metadata": {
+            "source_path": relative_path.replace(os.sep, "/"),
+            "file_name": os.path.basename(abs_path),
+        }
+    }
     
-    
-    except Exception as e:
-        # return f"读取失败: {e}"
-        raise ValueError(f"读取失败: {e}")
     
 def split_text(text: str, chunk_size: int = 200, chunk_overlap: int = 40,) -> list[str]:
     """

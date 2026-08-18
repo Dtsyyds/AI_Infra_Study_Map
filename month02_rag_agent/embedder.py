@@ -12,13 +12,14 @@ DEFAULT_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
 
 class LocalEmbedder:
+    normalized = True
     """本地 Embedding 模型封装"""
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME,) -> None:
+    def __init__(self, model_name: str = DEFAULT_MODEL_NAME) -> None:
         if not isinstance(model_name, str) or not model_name.strip():
             raise ValueError("模型名称不能为空")
         self.model_name = model_name
         # 模型只在创建 Embedder 加载一次
-        self.model = SentenceTransformer(self.model_name)
+        self.model = SentenceTransformer(self.model_name)  # BGE 检索模型训练时定义的非对称输入协议：同一个模型、同一套训练约定下，查询加 instruction、文档不加
         
     @staticmethod
     def _validate_text(text: str, field_name: str) -> None:
