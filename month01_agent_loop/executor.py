@@ -11,11 +11,12 @@ executor.py
 5. 如果解析失败，就返回错误信息
 """
 
+from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from parser import parse_action
 from tools import run_tool
 
 
-def execute_action(action_text: str) -> dict:
+def execute_action(action_text: str, *, context: ExecutionContext | None = None) -> dict:
     """
     执行一条 Action 指令。
 
@@ -32,24 +33,49 @@ def execute_action(action_text: str) -> dict:
             "content": "工具返回结果 / 最终答案 / 错误信息"
         }
     """
+    if context is not None:
+        try:
+            context.check_active()
+        except TaskCancelledError:
+            return {
+                "type": "cancelled",
+                "content": "任务已取消",
+                "success": False,
+            }
+        except TaskTimeoutError:
+            return {
+                "type": "timeout",
+                "content": "任务已超过截止时间",
+                "success": False,
+            }
 
     action = parse_action(action_text)
 
     if action["type"] == "error":
-        return {
-            "type": "error",
-            "content": action["content"]
-        }
+        return {"type": "error", "content": action["content"]}
 
     if action["type"] == "finish":
-        return {
-            "type": "finish",
-            "content": action["content"]
-        }
+        return {"type": "finish", "content": action["content"]}
 
     if action["type"] == "tool":
         tool_name = action["tool_name"]
         args = action["args"]
+
+        if context is not None:
+            try:
+                context.check_active()
+            except TaskCancelledError:
+                return {
+                    "type": "cancelled",
+                    "content": "任务已取消",
+                    "success": False,
+                }
+            except TaskTimeoutError:
+                return {
+                    "type": "timeout",
+                    "content": "任务已超过截止时间",
+                    "success": False,
+                }
 
         observation = run_tool(tool_name, **args)
 
@@ -60,16 +86,9 @@ def execute_action(action_text: str) -> dict:
 
         success = not observation.startswith("TOOL_ERROR:")
 
-        return {
-            "type": "observation",
-            "content": observation,
-            "success": success
-        }
+        return {"type": "observation", "content": observation, "success": success}
 
-    return {
-        "type": "error",
-        "content": f"未知解析类型: {action['type']}"
-    }
+    return {"type": "error", "content": f"未知解析类型: {action['type']}"}
 
 
 if __name__ == "__main__":
@@ -77,9 +96,9 @@ if __name__ == "__main__":
         'Action: calculator(expression="1 + 2 * 4")',
         'Action: write_file(path="./test.txt", content="hello world!")',
         'Action: read_file(path="./test.txt")',
-        'Action: Finish[任务完成]',
+        "Action: Finish[任务完成]",
         'Action: unknown_tool(value="test")',
-        'hello world',
+        "hello world",
     ]
 
     for text in test_cases:
