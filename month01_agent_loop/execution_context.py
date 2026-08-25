@@ -43,7 +43,7 @@ class ExecutionContext:
 
         # TODO 2：
         # 保存 clock。
-        self._clock = clock # 保存 clock 函数到实例变量中
+        self._clock = clock  # 保存 clock 函数到实例变量中
 
         start_time = clock()
 
@@ -81,7 +81,7 @@ class ExecutionContext:
         if deadline is None:
             return None
         else:
-            return max(0.0, deadline - self._clock()) # 调用保存的函数
+            return max(0.0, deadline - self._clock())  # 调用保存的函数
 
     def is_timed_out(self) -> bool:
         """判断任务是否已经到达 deadline。"""
@@ -118,3 +118,26 @@ class ExecutionContext:
             raise TaskTimeoutError("任务已超过截止时间")
 
         return None
+
+    def effective_timeout_seconds(
+        self,
+        *,
+        step_timeout_seconds: float | None,
+    ) -> float | None:
+        """
+        计算当前步骤真正可以使用的时间。
+
+        None 表示该层没有设置时间限制。
+        """
+        if step_timeout_seconds is not None and step_timeout_seconds < 0:
+            raise ValueError("step_timeout_seconds 必须大于等于0")
+        remaining = self.remaining_seconds()
+
+        if remaining is None and step_timeout_seconds is None:
+            return None
+        elif remaining is None:
+            return step_timeout_seconds
+        elif step_timeout_seconds is None:
+            return remaining
+        else:
+            return min(step_timeout_seconds, remaining)

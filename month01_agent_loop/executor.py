@@ -13,10 +13,17 @@ executor.py
 
 from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from parser import parse_action
+from tool_runtime import ToolExecutionTimeoutError, ToolRuntime
 from tools import run_tool
 
 
-def execute_action(action_text: str, *, context: ExecutionContext | None = None) -> dict:
+def execute_action(
+    action_text: str,
+    *,
+    context: ExecutionContext | None = None,
+    tool_runtime: ToolRuntime | None = None,
+    step_timeout_seconds: float | None = None,
+) -> dict:
     """
     执行一条 Action 指令。
 
@@ -33,34 +40,90 @@ def execute_action(action_text: str, *, context: ExecutionContext | None = None)
             "content": "工具返回结果 / 最终答案 / 错误信息"
         }
     """
-    if context is not None:
-        try:
-            context.check_active()
-        except TaskCancelledError:
-            return {
-                "type": "cancelled",
-                "content": "任务已取消",
-                "success": False,
-            }
-        except TaskTimeoutError:
-            return {
-                "type": "timeout",
-                "content": "任务已超过截止时间",
-                "success": False,
-            }
+    # operation = lambda: run_tool(
+    #     tool_name,
+    #     **args,
+    # )
+    # if context is not None:
+    #     try:
+    #         context.check_active()
+    #     except TaskCancelledError:
+    #         return {
+    #             "type": "cancelled",
+    #             "content": "任务已取消",
+    #             "success": False,
+    #         }
+    #     except TaskTimeoutError:
+    #         return {
+    #             "type": "timeout",
+    #             "content": "任务已超过截止时间",
+    #             "success": False,
+    #         }
 
+    # action = parse_action(action_text)
+
+    # if action["type"] == "error":
+    #     return {"type": "error", "content": action["content"]}
+
+    # if action["type"] == "finish":
+    #     return {"type": "finish", "content": action["content"]}
+
+    # if action["type"] == "tool":
+    #     tool_name = action["tool_name"]
+    #     args = action["args"]
+
+    #     if context is not None:
+    #         effective_timeout = context.effective_timeout_seconds(
+    #                             step_timeout_seconds=step_timeout_seconds,
+    #                         )
+    #         try:
+    #             context.check_active()
+    #         except TaskCancelledError:
+    #             return {
+    #                 "type": "cancelled",
+    #                 "content": "任务已取消",
+    #                 "success": False,
+    #             }
+    #         except TaskTimeoutError:
+    #             return {
+    #                 "type": "timeout",
+    #                 "content": "任务已超过截止时间",
+    #                 "success": False,
+    #             }
+    #     else:
+    #         effective_timeout = step_timeout_seconds
+    #     if tool_runtime is not None:
+    #         try:
+
+    #             tool_runtime.run(operation, timeout_seconds=effective_timeout)
+    #         except ToolExecutionTimeoutError:
+    #             return {
+    #                 "type": "timeout",
+    #                 "content": "工具执行超时",
+    #                 "success": False,
+    #             }
+
+    #     observation = run_tool(tool_name, **args)
+
+    #     # return {
+    #     #     "type": "observation",
+    #     #     "content": observation
+    #     # }
+
+    #     success = not observation.startswith("TOOL_ERROR:")
+
+    #     return {"type": "observation", "content": observation, "success": success}
+
+    # return {"type": "error", "content": f"未知解析类型: {action['type']}"}
     action = parse_action(action_text)
 
     if action["type"] == "error":
         return {"type": "error", "content": action["content"]}
-
     if action["type"] == "finish":
         return {"type": "finish", "content": action["content"]}
-
     if action["type"] == "tool":
         tool_name = action["tool_name"]
         args = action["args"]
-
         if context is not None:
             try:
                 context.check_active()
@@ -77,12 +140,31 @@ def execute_action(action_text: str, *, context: ExecutionContext | None = None)
                     "success": False,
                 }
 
-        observation = run_tool(tool_name, **args)
+            effective_timeout = context.effective_timeout_seconds(
+                step_timeout_seconds=step_timeout_seconds,
+            )
+        else:
+            effective_timeout = step_timeout_seconds
 
-        # return {
-        #     "type": "observation",
-        #     "content": observation
-        # }
+        def operation() -> str:
+            return run_tool(
+                tool_name,
+                **args,
+            )
+
+        if tool_runtime is not None:
+            try:
+                observation = tool_runtime.run(operation, timeout_seconds=effective_timeout)
+                # observation = operation() # 这里会执行两次
+            except ToolExecutionTimeoutError:
+                return {
+                    "type": "timeout",
+                    "content": "工具执行超时",
+                    "success": False,
+                }
+        else:
+            # observation = run_tool(action["tool_name"], **args)
+            observation = operation()
 
         success = not observation.startswith("TOOL_ERROR:")
 
