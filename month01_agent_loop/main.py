@@ -4,24 +4,16 @@ main.py
 V0 规则版 Agent 的命令行入口
 
 """
+
+from concurrent.futures import ThreadPoolExecutor
+
 from agent import LLMAgent
+from tool_runtime import ToolRuntime
 
 
-def main():
-    # agent = RuleBaseAgent()
-
-    # print("V0 规则版 Agent Loop")
-    # print("当前支持：")
-    # print("1. 计算 1 + 2 * 4")
-    # print("2. 写入 ./test.txt hello world")
-    # print("3. 读取 ./test.txt")
-    # print("输入 exit / quit 退出")
-    # print("输入 memory 查看记忆")
-    # print("输入 clear 清空记忆")
-
-    agent = LLMAgent(max_steps=5)
-
-    # print("V1 FakerLLM React Agent Loop")
+def run_cli(agent: LLMAgent) -> None:
+    """运行命令行交互循环。"""
+    print("V1 FakerLLM React Agent Loop")
     print("当前支持：")
     print("1. 计算 1 + 2 * 4")
     print("2. 写入 ./test.txt hello world")
@@ -30,7 +22,6 @@ def main():
     print("输入 exit / quit 退出")
     print("输入 memory 查看记忆")
     print("输入 clear 清空记忆")
-
 
     while True:
         user_input = input("\nuser: ").strip()
@@ -50,6 +41,33 @@ def main():
 
         answer = agent.run(user_input)
         print("\nAgent:", answer)
+
+
+def main():
+    # agent = RuleBaseAgent()
+
+    # print("V0 规则版 Agent Loop")
+    # print("当前支持：")
+    # print("1. 计算 1 + 2 * 4")
+    # print("2. 写入 ./test.txt hello world")
+    # print("3. 读取 ./test.txt")
+    # print("输入 exit / quit 退出")
+    # print("输入 memory 查看记忆")
+    # print("输入 clear 清空记忆")
+
+    executor = ThreadPoolExecutor(max_workers=4)
+    tool_runtime = ToolRuntime(executor)
+
+    agent = LLMAgent(max_steps=5, tool_runtime=tool_runtime, step_timeout_seconds=10)
+
+    try:
+        run_cli(agent)
+    finally:
+        executor.shutdown(
+            wait=True,
+            cancel_futures=True,  # cancel_futures=True：取消队列中尚未开始的任务；
+        )
+
 
 if __name__ == "__main__":
     main()
