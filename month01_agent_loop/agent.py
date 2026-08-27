@@ -21,10 +21,12 @@ V0 版本 Agent
 import re
 from trace import AgentTrace
 
+from execution_context import ExecutionContext
 from executor import execute_action
 from llm import call_llm
 from memory import Memory
 from prompts import build_prompt
+from tool_runtime import ToolRuntime
 
 
 class RuleBaseAgent:
@@ -154,16 +156,21 @@ class LLMAgent:
     这个版本不再由 agent.py 直接生成 Thought / Action, 而是通过 prompts.py 构建 prompt ，再调用 LLM 来生成 Thought / Action
     """
 
-    def __init__(self, max_steps: int = 3):
+    def __init__(self, max_steps: int = 3, *, tool_runtime: ToolRuntime | None = None, step_timeout_seconds: float | None = None):
         self.memory = Memory(max_messages=50)
         self.max_steps = max_steps
         # 保存最近一次任务的 trace, 供 eval 使用
         self.last_trace = None
+        self.tool_runtime = tool_runtime
+        self.step_timeout_seconds = step_timeout_seconds
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, *, context: ExecutionContext | None = None, ) -> str:
         """
         执行最大次数下的 Agent 流程
         """
+        # 必须在循环外创建，因为所有 step 要共享同一个总任务上下文。
+        if context is None:
+            context = ExecutionContext()
         # Agent trace 记录
         trace = AgentTrace()
 
@@ -249,7 +256,12 @@ class LLMAgent:
                 return final_answer
             
             action_history.append(action)
-            result = execute_action(action)
+            result = execute_action(
+                action,
+                context=context,
+                tool_runtime=self.tool_runtime,
+                step_timeout_seconds=self.step_timeout_seconds,
+            )
             print("\n[RESULT]")
             print(result)
 
@@ -273,6 +285,20 @@ class LLMAgent:
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
                 trace.finish(final_answer, status="success")
+                return final_answer
+
+            if result["type"] == "cancelled":
+                final_answer = result["content"]
+                task_memory.add_ai_message(f"Final Answer: {final_answer}")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                trace.finish(final_answer, status="cancelled")
+                return final_answer
+
+            if result["type"] == "timeout":
+                final_answer = result["content"]
+                task_memory.add_ai_message(f"Final Answer: {final_answer}")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                trace.finish(final_answer, status="timeout")
                 return final_answer
             
             if result["type"] == "error":
