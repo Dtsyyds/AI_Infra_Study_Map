@@ -15,10 +15,7 @@ def test_llm_agent_propagates_runtime_controls_to_executor(
     captured = {}
 
     def fake_call_llm(prompt):
-        return (
-            "Thought: 测试 Runtime 参数传播\n"
-            "Action: Finish[任务完成]"
-        )
+        return "Thought: 测试 Runtime 参数传播\nAction: Finish[任务完成]"
 
     def fake_execute_action(
         action,
@@ -30,9 +27,7 @@ def test_llm_agent_propagates_runtime_controls_to_executor(
         captured["action"] = action
         captured["context"] = context
         captured["tool_runtime"] = tool_runtime
-        captured["step_timeout_seconds"] = (
-            step_timeout_seconds
-        )
+        captured["step_timeout_seconds"] = step_timeout_seconds
 
         return {
             "type": "finish",
@@ -69,6 +64,7 @@ def test_llm_agent_propagates_runtime_controls_to_executor(
     assert captured["tool_runtime"] is tool_runtime
     assert captured["step_timeout_seconds"] == 2
 
+
 @pytest.mark.parametrize(
     ("result_type", "content"),
     [
@@ -87,27 +83,22 @@ def test_llm_agent_stops_after_terminal_runtime_result(
     def fake_call_llm(prompt):
         nonlocal llm_call_count
         llm_call_count += 1
-        return (
-            "Thought: 测试 Runtime 结果\n"
-            f'Action: calculator(expression="{1 + 2 * 3}")'
-        )
+        return f'Thought: 测试 Runtime 结果\nAction: calculator(expression="{1 + 2 * 3}")'
 
     def fake_execute_action(
-            action,
-            *,
-            context=None,
-            tool_runtime=None,
-            step_timeout_seconds=None,
+        action,
+        *,
+        context=None,
+        tool_runtime=None,
+        step_timeout_seconds=None,
     ):
         nonlocal execute_call_count
         execute_call_count += 1
-        return (
-            {
-                "type": result_type,
-                "content": content,
-                "success": False,
-            }
-        )
+        return {
+            "type": result_type,
+            "content": content,
+            "success": False,
+        }
 
     monkeypatch.setattr(
         agent_module,
