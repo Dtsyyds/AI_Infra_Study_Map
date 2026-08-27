@@ -9,6 +9,17 @@ class FakeToolRuntime:
     """只用于验证对象是否被 Agent 向下传递。"""
 
 
+class FakeClock:
+    def __init__(self):
+        self.current = 0.0
+
+    def __call__(self):
+        return self.current
+
+    def advance(self, seconds):
+        self.current += seconds
+
+
 def test_llm_agent_propagates_runtime_controls_to_executor(
     monkeypatch,
 ):
@@ -129,3 +140,90 @@ def test_llm_agent_stops_after_terminal_runtime_result(
         "role": "assistant",
         "content": f"Final Answer: {content}",
     }
+
+
+def test_llm_agent_skips_llm_when_context_is_cancelled(
+    monkeypatch,
+):
+    context = ExecutionContext(timeout_seconds=10)
+    context.cancel()
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("失效任务不应调用下游组件")
+
+    monkeypatch.setattr(
+        agent_module,
+        "call_llm",
+        fail_if_called,
+    )
+
+    monkeypatch.setattr(
+        agent_module,
+        "build_prompt",
+        fail_if_called,
+    )
+
+    monkeypatch.setattr(
+        agent_module,
+        "execute_action",
+        fail_if_called,
+    )
+
+    agent = LLMAgent(max_steps=3)
+    answer = agent.run("测试任务", context=context)
+
+    assert answer == "任务已取消"
+    snapshot = agent.last_trace.snapshot()
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["final_answer"] == "任务已取消"
+    assert snapshot["steps"] == []
+
+
+def test_llm_agent_skips_llm_when_context_is_timed_out(
+    monkeypatch,
+):
+    def fail_if_called(*_args, **_kwargs):
+        # 验证失效任务不应调用下游组件
+        raise AssertionError("失效任务不应调用下游组件")
+
+    monkeypatch.setattr(
+        agent_module,
+        "call_llm",
+        fail_if_called,
+    )
+
+    monkeypatch.setattr(
+        agent_module,
+        "build_prompt",
+        fail_if_called,
+    )
+
+    monkeypatch.setattr(
+        agent_module,
+        "execute_action",
+        fail_if_called,
+    )
+
+    # context = ExecutionContext(timeout_seconds=10)
+    # context.remaining_seconds() == 0    # 这一步只是一个 bool 判断
+    clock = FakeClock()
+
+    context = ExecutionContext(
+        timeout_seconds=10,
+        clock=clock,
+    )
+
+    clock.advance(10)
+
+    assert context.remaining_seconds() == 0
+
+    agent = LLMAgent(max_steps=3)
+    answer = agent.run("测试任务", context=context)
+
+    assert answer == "工具执行超时"
+    snapshot = agent.last_trace.snapshot()
+
+    assert snapshot["status"] == "timeout"
+    assert snapshot["final_answer"] == "工具执行超时"
+    assert snapshot["steps"] == []

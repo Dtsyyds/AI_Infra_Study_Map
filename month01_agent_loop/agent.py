@@ -21,7 +21,7 @@ V0 版本 Agent
 import re
 from trace import AgentTrace
 
-from execution_context import ExecutionContext
+from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from executor import execute_action
 from llm import call_llm
 from memory import Memory
@@ -188,22 +188,37 @@ class LLMAgent:
         # 必须在循环外创建，因为所有 step 要共享同一个总任务上下文。
         if context is None:
             context = ExecutionContext()
+
         # Agent trace 记录
         trace = AgentTrace()
 
         # 保存本次执行轨迹对象
         self.last_trace = trace
+        # 同步记录到 track 中
+        trace.set_user_input(user_input)
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
         action_history = []
         last_observation = ""
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
-        # 同步记录到 track 中
-        trace.set_user_input(user_input)
 
         for step in range(self.max_steps):
             print(f"======== step: {step} ======")
+            try:
+                context.check_active()
+            except TaskCancelledError:
+                final_answer = "任务已取消"
+                self.memory.add_ai_message(content=final_answer)
+                trace.finish(final_answer, status="cancelled")
+                self.last_trace = trace
+                return final_answer
+            except TaskTimeoutError:
+                final_answer = "工具执行超时"
+                self.memory.add_ai_message(content=final_answer)
+                trace.finish(final_answer, status="timeout")
+                self.last_trace = trace
+                return final_answer
             # memory_content = self.memory.get_content()
             memory_content = task_memory.get_content()
             prompt = build_prompt(user_input, memory_content)
