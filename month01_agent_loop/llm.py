@@ -8,6 +8,7 @@ llm.py
 - 根据用户输入模拟大模型的输出生成  Thought / Action 格式的输出
 - 用来测试 Agent Loop 的整体链路
 """
+
 import os
 import re
 
@@ -16,11 +17,18 @@ from openai import OpenAI
 
 from tools import is_sensitive_path
 
+DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
+
 load_dotenv()
 
-class FakerLLM:
 
-    def generate(self, prompt: str) -> str:
+class FakerLLM:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> str:
         """
         根据 prompt 模拟生成 Thought / Action 格式的输出
         """
@@ -30,14 +38,12 @@ class FakerLLM:
         last_observation = self._extract_last_observation(prompt)
         if last_observation:
             if last_observation.startswith("TOOL_OK:"):
-                content = last_observation.removeprefix(
-                    "TOOL_OK:"
-                ).strip()
+                content = last_observation.removeprefix("TOOL_OK:").strip()
 
                 if self._is_list_files_task(user_input):
                     return (
                         "Thought: 工具已经成功执行，我需要整理成自然语言回答\n"
-                        f'Action: Finish[当前目录包含以下文件和文件夹：{content}]'
+                        f"Action: Finish[当前目录包含以下文件和文件夹：{content}]"
                     )
                 return (
                     "Thought: 工具已经成功执行，我应该整理成自然语言回答\n"
@@ -45,9 +51,7 @@ class FakerLLM:
                 )
 
             if last_observation.startswith("TOOL_ERROR:"):
-                error = last_observation.removeprefix(
-                    "TOOL_ERROR:"
-                ).strip()
+                error = last_observation.removeprefix("TOOL_ERROR:").strip()
 
                 return (
                     "Thought: 工具执行失败，我应该解释原因并给出检查建议\n"
@@ -59,7 +63,7 @@ class FakerLLM:
                 "Thought: 我已经拿到了工具返回结果，可以给出最终答案\n"
                 f"Action: Finish[工具执行结果是：{last_observation}]"
             )
-        
+
         if self._is_calculate_task(user_input):
             expression = self._extract_expression(user_input)
 
@@ -67,13 +71,13 @@ class FakerLLM:
                 "Thought: 用户需要计算数学表达式, 我应该调用 calculator 工具\n"
                 f'Action: calculator(expression="{expression}")'
             )
-        
+
         if self._is_list_files_task(user_input):
             return (
                 "Thought: 用户需要查看当前目录，我应该调用 list_files 工具\n"
-                'Action: list_files(path=".")' 
+                'Action: list_files(path=".")'
             )
-        
+
         if user_input.startswith("读取"):
             path = user_input.replace("读取", "", 1).strip()
 
@@ -85,9 +89,9 @@ class FakerLLM:
             if is_sensitive_path(path):
                 return (
                     "Thought: 用户需要读取文件内容, 但该文件敏感，拒绝执行\n"
-                    f'Action: Finish[出于安全考虑，{path} 属于敏感路径，不能读取]'
+                    f"Action: Finish[出于安全考虑，{path} 属于敏感路径，不能读取]"
                 )
-            
+
             # 项目目录外路径在工具调用前拒绝
             if self._is_workspace_boundary_path(path):
                 return (
@@ -98,27 +102,25 @@ class FakerLLM:
                 "Thought: 用户需要读取文件内容, 我应该调用 read_file 工具\n"
                 f'Action: read_file(path="{path}")'
             )
-        
+
         if user_input.startswith("写入"):
-            rest =  user_input.replace("写入","", 1).strip()
+            rest = user_input.replace("写入", "", 1).strip()
             path, content = rest.split(" ", 1)
 
             return (
                 "Thought: 用户需要写入文件内容, 我应该调用 write_file 工具\n"
                 f'Action: write_file(path="{path}", content="{content}")'
             )
-        
 
-        
         return (
             "Thought: 当前任务不需要调用工具，或者 FakerLLM 暂时无法识别用户意图\n"
             "Action: Finish[当前 FakerLLM 只能处理计算、读取和写入任务]"
         )
-    
+
     def _extract_user_input(self, prompt: str) -> str:
         """
         从完整 prompt 中提取用户输入
-        
+
         Args:
             prompt: 完整的 prompt 字符串
         Returns:
@@ -130,9 +132,7 @@ class FakerLLM:
 
         # match = re.search(r"用户输入:\n(.*)", prompt);
         match = re.search(
-            r"用户输入[:：]\s*\n(.*?)(?=\n\n请输出 Thought 和 Action|\Z)",
-            prompt,
-            flags=re.DOTALL
+            r"用户输入[:：]\s*\n(.*?)(?=\n\n请输出 Thought 和 Action|\Z)", prompt, flags=re.DOTALL
         )
         """
         从 prompt 字符串中提取紧跟在“用户输入:”或“用户输入：”之后（允许冒号后有空白和换行）的一大段内容，直到遇到下一个 \n\n请输出 Thought 和 Action 或字符串结尾为止。
@@ -140,11 +140,11 @@ class FakerLLM:
         if match:
             return match.group(1)
         return ""
-    
+
     def _extract_last_observation(self, prompt: str) -> str:
         """
         从完整 Prompt 中提取最后一次的 observation
-        
+
         memory_content 中可能包含多次 observation, 这里只取最后一次
         正常返回 observation: 9
 
@@ -189,12 +189,11 @@ class FakerLLM:
         #     return matches[-1].strip()
         # else:
         #     return ""
-            
-    
+
     def _is_calculate_task(self, user_input: str) -> bool:
         """
         判断用户输入是否是计算任务
-        
+
         Args:
             user_input: 用户输入的内容
         Returns:
@@ -203,7 +202,7 @@ class FakerLLM:
         calculate_keywords = ["计算", "求值", "evaluate", "calculate", "算一下", "算出", "算"]
 
         return any(keyword in user_input for keyword in calculate_keywords)
-    
+
     def _extract_expression(self, user_input: str) -> str:
         """
         从用户输入中提取数学表达式
@@ -217,22 +216,23 @@ class FakerLLM:
         match = re.search(r"([0-9+\-*/().\s]+)", user_input)
         if match:
             return match.group(0).strip()
-        
+
         return user_input.replace("计算", "", 1).strip()
-    
+
     def _is_list_files_task(self, user_input: str) -> bool:
         """
         判断用户输入是否是查看当前目录的任务
         """
         keywords = [
-            "查看当前目录", "列出文件", "显示所有文件和文件夹",
-            "列出当前目录下的内容", "展示当前目录的文件列表", 
-            "请列出当前目录中的所有项目或文件"
+            "查看当前目录",
+            "列出文件",
+            "显示所有文件和文件夹",
+            "列出当前目录下的内容",
+            "展示当前目录的文件列表",
+            "请列出当前目录中的所有项目或文件",
         ]
-        return any(
-            keyword in user_input for keyword in keywords
-        )
-    
+        return any(keyword in user_input for keyword in keywords)
+
     def _is_workspace_boundary_path(self, path: str) -> bool:
         normalized_path = os.path.normpath(path)
 
@@ -242,6 +242,7 @@ class FakerLLM:
             or normalized_path == ".."
             or normalized_path.startswith(".." + os.sep)
         )
+
 
 class OpenAICompatibleLLM:
     """
@@ -261,17 +262,11 @@ class OpenAICompatibleLLM:
     """
 
     def __init__(self):
-        api_key = (
-            os.getenv("Agent_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        )
+        api_key = os.getenv("Agent_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-        base_url = (
-            os.getenv("Agent_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-        )
+        base_url = os.getenv("Agent_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
-        model_name = (
-            os.getenv("Agent_AI_MODEL_NAME") or os.getenv("MODEL_NAME")
-        )
+        model_name = os.getenv("Agent_AI_MODEL_NAME") or os.getenv("MODEL_NAME")
 
         if not api_key:
             raise ValueError("Missing API key")
@@ -288,7 +283,9 @@ class OpenAICompatibleLLM:
             base_url=base_url,
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(
+        self, prompt: str, *, timeout_seconds: float | None = (DEFAULT_LLM_TIMEOUT_SECONDS)
+    ) -> str:
         """
         调用真实的 LLM, 返回 Thought / Action 格式的输出
         """
@@ -309,7 +306,7 @@ class OpenAICompatibleLLM:
                     messages=[
                         {
                             "role": "system",
-                            "content":(
+                            "content": (
                                 "你是一个严格的 Agent 动作生成器"
                                 "你只能输出 Thought / Action 两行"
                                 "不要输出 Markdown"
@@ -323,22 +320,22 @@ class OpenAICompatibleLLM:
                         },
                     ],
                     temperature=0,
-                    timeout=30,
+                    timeout=timeout_seconds,
                 )
-                
+
                 content = completion.choices[0].message.content
 
                 if content is None:
                     return "Thought: 模型没有返回内容\nAction: Finish[模型没有返回内容]"
-                
+
                 return self._clean_output(content)
-            
+
             except Exception as e:
                 last_error = e
                 print(f"[LLM Error] 第 {attempt + 1} 次调用失败：{e}")
 
         raise RuntimeError(f"真实 LLM 调用失败，已重试两次，最后一次错误：{last_error}")
-    
+
     def _clean_output(self, text: str) -> str:
         """
         清理模型可能输出的 Markdown 代码块
@@ -359,17 +356,21 @@ class OpenAICompatibleLLM:
             return "\n".join(code_lines)
         else:
             return text
-        
-def call_llm(prompt: str) -> str:
+
+
+def call_llm(prompt: str, *, timeout_seconds: float | None = (DEFAULT_LLM_TIMEOUT_SECONDS)) -> str:
     """
     统一的 LLM 调用接口
-    
+
     LLM_MODE=fake 使用 FakerLLM
     LLM_MODE=real 使用真实 API
-    
+
     """
 
     # llm = FakerLLM()
+    if timeout_seconds is not None and timeout_seconds < 0:
+        raise ValueError("timeout_seconds 不能为负数")
+
     mode = os.getenv("LLM_MODE", "fake").lower()
 
     if mode == "real":
@@ -378,6 +379,7 @@ def call_llm(prompt: str) -> str:
         llm = FakerLLM()
 
     return llm.generate(prompt)
+
 
 if __name__ == "__main__":
     from prompts import build_prompt
@@ -388,7 +390,7 @@ if __name__ == "__main__":
         "请帮我计算 (3 + 5) * 2",
         "读取 month01_agent_loop/prompts.py 文件内容",
         "写入 month01_agent_loop/test.txt Hello World",
-        "你好"
+        "你好",
     ]
 
     for user_input in test_cases:

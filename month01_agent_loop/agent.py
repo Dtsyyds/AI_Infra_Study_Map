@@ -168,13 +168,18 @@ class LLMAgent:
         *,
         tool_runtime: ToolRuntime | None = None,
         step_timeout_seconds: float | None = None,
+        llm_timeout_seconds: float | None = 30,
     ):
+        if llm_timeout_seconds is None and llm_timeout_seconds < 0:
+            raise ValueError("llm_timeout_seconds 不能为负数")
+
         self.memory = Memory(max_messages=50)
         self.max_steps = max_steps
         # 保存最近一次任务的 trace, 供 eval 使用
         self.last_trace = None
         self.tool_runtime = tool_runtime
         self.step_timeout_seconds = step_timeout_seconds
+        self.llm_timeout_seconds = llm_timeout_seconds
 
     def run(
         self,
@@ -225,7 +230,10 @@ class LLMAgent:
 
             # 适配 7.3 修改
             try:
-                llm_output = call_llm(prompt)
+                effective_llm_timeout = context.effective_timeout_seconds(
+                    step_timeout_seconds=self.step_timeout_seconds
+                )
+                llm_output = call_llm(prompt, timeout_seconds=effective_llm_timeout)
             except Exception as e:
                 error_msg = f"LLM 调用失败， 错误原因：{e}"
 

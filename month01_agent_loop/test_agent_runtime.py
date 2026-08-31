@@ -25,7 +25,7 @@ def test_llm_agent_propagates_runtime_controls_to_executor(
 ):
     captured = {}
 
-    def fake_call_llm(prompt):
+    def fake_call_llm(prompt, *, timeout_seconds=None):
         return "Thought: 测试 Runtime 参数传播\nAction: Finish[任务完成]"
 
     def fake_execute_action(
@@ -92,7 +92,7 @@ def test_llm_agent_stops_after_terminal_runtime_result(
     llm_call_count = 0
     execute_call_count = 0
 
-    def fake_call_llm(prompt):
+    def fake_call_llm(prompt, *, timeout_seconds=None):
         nonlocal llm_call_count
         llm_call_count += 1
         return f'Thought: 测试 Runtime 结果\nAction: calculator(expression="{1 + 2 * 3}")'
@@ -228,3 +228,66 @@ def test_llm_agent_skips_llm_when_context_is_timed_out(
     assert snapshot["status"] == "timeout"
     assert snapshot["final_answer"] == "工具执行超时"
     assert snapshot["steps"] == []
+
+
+def test_llm_agent_passes_effective_timeout_to_llm(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_call_llm(
+        prompt,
+        *,
+        timeout_seconds=None,
+    ):
+        captured["prompt"] = prompt
+        captured["timeout_seconds"] = timeout_seconds
+
+        return "Thought: 测试 LLM timeout 传播\nAction: Finish[任务完成]"
+
+    def fake_execute_action(
+        action,
+        *,
+        context=None,
+        tool_runtime=None,
+        step_timeout_seconds=None,
+    ):
+        return {
+            "type": "finish",
+            "content": "任务完成",
+        }
+
+    monkeypatch.setattr(
+        agent_module,
+        "call_llm",
+        fake_call_llm,
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "execute_action",
+        fake_execute_action,
+    )
+
+    clock = FakeClock()
+    context = ExecutionContext(
+        timeout_seconds=10,
+        clock=clock,
+    )
+
+    # 总预算只剩 2 秒。
+    clock.advance(8)
+
+    agent = LLMAgent(
+        max_steps=1,
+        llm_timeout_seconds=5,
+    )
+
+    answer = agent.run(
+        "测试任务",
+        context=context,
+    )
+
+    assert answer == "任务完成"
+
+    # min(LLM 单次上限 5, 总预算剩余 2) == 2
+    assert captured["timeout_seconds"] == 2
