@@ -1,5 +1,7 @@
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from threading import Barrier, Event
+from time import monotonic, sleep
 
 import pytest
 
@@ -349,3 +351,112 @@ def test_stats_completed_future_is_not_in_flight():
     assert result == "ok"
     assert stats.submitted_total == 1
     assert stats.in_flight == 0
+
+
+def wait_for_stats(
+    runtime,
+    predicate,
+    *,
+    timeout_seconds=1.0,
+):
+    deadline = monotonic() + timeout_seconds
+    last_stats = runtime.stats_snapshot()
+
+    while not predicate(last_stats):
+        if monotonic() >= deadline:
+            pytest.fail(f"等待 Runtime 指标状态超时，最后快照：{last_stats}")
+
+        # 只是轮询退避，不是依靠固定等待保证正确性。
+        sleep(0.001)
+        last_stats = runtime.stats_snapshot()
+
+    return last_stats
+
+
+def test_stats_are_consistent_under_concurrent_load():
+    worker_count = 4
+
+    all_started = Barrier(worker_count + 1)
+    release_tasks = Event()
+
+    def blocking_operation():
+        # 证明 4 个工具线程都已经开始运行。
+        all_started.wait(timeout=5)
+
+        # 阻止工具任务提前结束。
+        if not release_tasks.wait(timeout=5):
+            raise TimeoutError("等待测试释放工具任务超时")
+
+        return "ok"
+
+    with ThreadPoolExecutor(max_workers=worker_count) as tool_executor:
+        runtime = ToolRuntime(
+            executor=tool_executor,
+            capacity=worker_count,
+        )
+
+        with ThreadPoolExecutor(max_workers=worker_count) as caller_executor:
+            caller_futures = [
+                caller_executor.submit(
+                    runtime.run,
+                    blocking_operation,
+                    timeout_seconds=10,
+                )
+                for _ in range(worker_count)
+            ]
+
+            try:
+                # 这里只能证明 4 个 operation 已启动。
+                all_started.wait(timeout=5)
+
+                # 继续等待调用线程完成提交后的指标更新。
+                stats = wait_for_stats(
+                    runtime,
+                    lambda current: (
+                        current.submitted_total == worker_count
+                        and current.in_flight == worker_count
+                    ),
+                )
+
+                assert stats.submitted_total == 4
+                assert stats.in_flight == 4
+                assert stats.rejected_total == 0
+
+                # 4 个容量许可都被占用，
+                # 第 5 个请求必须在 submit 前被拒绝。
+                with pytest.raises(ToolRuntimeOverloadedError):
+                    runtime.run(
+                        lambda: "should-not-run",
+                        timeout_seconds=0,
+                    )
+
+                # rejected_total 在当前主线程中同步更新，
+                # 异常抛出后可以立即读取。
+                stats = runtime.stats_snapshot()
+
+                assert stats.submitted_total == 4
+                assert stats.in_flight == 4
+                assert stats.rejected_total == 1
+
+            finally:
+                # 无论前面的断言是否失败，
+                # 都必须释放工具线程，避免线程池退出时挂死。
+                release_tasks.set()
+
+            # 等待 4 个调用线程得到工具返回值。
+            results = [future.result(timeout=5) for future in caller_futures]
+
+            assert results == ["ok"] * worker_count
+
+            # 调用线程返回与 done callback 完成之间
+            # 仍可能存在很短的并发窗口，因此继续等待 in_flight 清零。
+            stats = wait_for_stats(
+                runtime,
+                lambda current: current.in_flight == 0,
+            )
+
+            assert stats.submitted_total == 4
+            assert stats.in_flight == 0
+            assert stats.rejected_total == 1
+            assert stats.submit_failed_total == 0
+            assert stats.caller_timeout_total == 0
