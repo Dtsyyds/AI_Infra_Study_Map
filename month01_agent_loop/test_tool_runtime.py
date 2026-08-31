@@ -1,12 +1,12 @@
-from concurrent.futures import (
-    TimeoutError as FutureTimeoutError,
-)
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
 
 from tool_runtime import (
     ToolExecutionTimeoutError,
     ToolRuntime,
+    ToolRuntimeOverloadedError,
 )
 
 
@@ -107,3 +107,118 @@ def test_tool_runtime_returns_completed_result():
     assert result == "TOOL_OK: completed"
     assert future.received_timeout == 2
     assert future.cancel_called is False
+
+
+class SequenceExecutor:
+    """按照给定顺序返回 Future 或抛出异常。"""
+
+    def __init__(self, outcomes):
+        self._outcomes = iter(outcomes)
+        self.submit_count = 0
+
+    def submit(self, _operation):
+        self.submit_count += 1
+        outcome = next(self._outcomes)
+
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+        return outcome
+
+
+def test_running_future_keeps_capacity_after_caller_timeout():
+    running_future = Future()
+    assert running_future.set_running_or_notify_cancel()
+
+    completed_future = Future()
+    completed_future.set_result("second-ok")
+
+    fake_executor = SequenceExecutor(
+        [
+            running_future,
+            completed_future,
+        ]
+    )
+
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    # 调用方超时，但 running_future 已经运行，无法取消。
+    with pytest.raises(ToolExecutionTimeoutError):
+        runtime.run(
+            lambda: "first-ok",
+            timeout_seconds=0,
+        )
+
+    # running_future 仍在运行，容量许可尚未释放。
+    with pytest.raises(ToolRuntimeOverloadedError):
+        runtime.run(
+            lambda: "should-not-run",
+            timeout_seconds=0,
+        )
+
+    # 被拒绝的任务没有进入 Executor。
+    assert fake_executor.submit_count == 1
+
+    # 模拟后台任务真正完成，done callback 应释放许可。
+    running_future.set_result("late-result")
+
+    result = runtime.run(
+        lambda: "third-ok",
+        timeout_seconds=0,
+    )
+
+    assert result == "second-ok"
+    assert fake_executor.submit_count == 2
+
+
+def test_submit_failure_releases_capacity():
+    completed_future = Future()
+    completed_future.set_result("ok")
+
+    fake_executor = SequenceExecutor(
+        [
+            RuntimeError("submit failed"),
+            completed_future,
+        ]
+    )
+
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    # 第一次已经拿到许可，但 submit 本身失败。
+    with pytest.raises(
+        RuntimeError,
+        match="submit failed",
+    ):
+        runtime.run(
+            lambda: "first-ok",
+            timeout_seconds=0,
+        )
+
+    # 如果 submit 失败时归还了许可，第二次就能成功。
+    result = runtime.run(
+        lambda: "second-ok",
+        timeout_seconds=0,
+    )
+
+    assert fake_executor.submit_count == 2
+    assert result == "ok"
+
+
+@pytest.mark.parametrize("capacity", [0, -1])
+def test_capacity_must_be_positive(capacity):
+    fake_executor = SequenceExecutor([])
+
+    with pytest.raises(
+        ValueError,
+        match="capacity",
+    ):
+        ToolRuntime(
+            executor=fake_executor,
+            capacity=capacity,
+        )
