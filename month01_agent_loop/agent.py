@@ -303,21 +303,28 @@ class LLMAgent:
                 final_answer = result["content"]
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
-                trace.finish(final_answer, status="success")
+                trace.finish(
+                    final_answer,
+                    status="success",
+                )
                 return final_answer
 
-            if result["type"] == "cancelled":
+            if result["type"] in {
+                "cancelled",
+                "timeout",
+                "overloaded",
+            }:
                 final_answer = result["content"]
-                task_memory.add_ai_message(f"Final Answer: {final_answer}")
-                self.memory.add_ai_message(f"Final Answer: {final_answer}")
-                trace.finish(final_answer, status="cancelled")
-                return final_answer
 
-            if result["type"] == "timeout":
-                final_answer = result["content"]
+                # 作为最终回答写入 assistant 消息，
+                # 不应写成 observation。
                 task_memory.add_ai_message(f"Final Answer: {final_answer}")
                 self.memory.add_ai_message(f"Final Answer: {final_answer}")
-                trace.finish(final_answer, status="timeout")
+
+                trace.finish(
+                    final_answer,
+                    status=result["type"],
+                )
                 return final_answer
 
             if result["type"] == "error":

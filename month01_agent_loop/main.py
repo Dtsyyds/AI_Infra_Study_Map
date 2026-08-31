@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from agent import LLMAgent
 from tool_runtime import ToolRuntime
 
+TOOL_MAX_WORKERS = 4
+TOOL_CAPACITY = 8
+
 
 def run_cli(agent: LLMAgent) -> None:
     """运行命令行交互循环。"""
@@ -55,8 +58,13 @@ def main():
     # print("输入 memory 查看记忆")
     # print("输入 clear 清空记忆")
 
-    executor = ThreadPoolExecutor(max_workers=4)
-    tool_runtime = ToolRuntime(executor)
+    executor = ThreadPoolExecutor(
+        max_workers=TOOL_MAX_WORKERS,
+    )
+    tool_runtime = ToolRuntime(
+        executor=executor,
+        capacity=TOOL_CAPACITY,
+    )
 
     agent = LLMAgent(max_steps=5, tool_runtime=tool_runtime, step_timeout_seconds=10)
 

@@ -65,3 +65,50 @@ def test_cli_exception_shutdown_with_executor(monkeypatch):
             "cancel_futures": True,
         }
     ]
+
+
+def test_main_configures_bounded_tool_runtime(
+    monkeypatch,
+):
+    captured = {}
+    fake_executor = RecordingExecutor()
+    fake_runtime = object()
+
+    def fake_executor_factory(*, max_workers):
+        captured["max_workers"] = max_workers
+        return fake_executor
+
+    def fake_runtime_factory(
+        executor,
+        *,
+        capacity,
+    ):
+        captured["runtime_executor"] = executor
+        captured["capacity"] = capacity
+        return fake_runtime
+
+    def fake_run_cli(agent):
+        captured["agent"] = agent
+
+    monkeypatch.setattr(
+        main_module,
+        "ThreadPoolExecutor",
+        fake_executor_factory,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "ToolRuntime",
+        fake_runtime_factory,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_cli",
+        fake_run_cli,
+    )
+
+    main_module.main()
+
+    assert captured["max_workers"] == 4
+    assert captured["runtime_executor"] is fake_executor
+    assert captured["capacity"] == 8
+    assert captured["agent"].tool_runtime is fake_runtime

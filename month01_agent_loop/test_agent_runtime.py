@@ -81,6 +81,7 @@ def test_llm_agent_propagates_runtime_controls_to_executor(
     [
         ("timeout", "工具执行超时"),
         ("cancelled", "任务已取消"),
+        ("overloaded", "工具运行时容量已满"),
     ],
 )
 def test_llm_agent_stops_after_terminal_runtime_result(
