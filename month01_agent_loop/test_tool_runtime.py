@@ -16,6 +16,7 @@ class TimedOutFuture:
     def __init__(self):
         self.received_timeout = None
         self.cancel_called = False
+        self._done_callbacks = []
 
     def result(self, timeout=None):
         self.received_timeout = timeout
@@ -26,6 +27,9 @@ class TimedOutFuture:
 
         # False 表示任务已经开始，无法取消。
         return False
+
+    def add_done_callback(self, callback):
+        self._done_callbacks.append(callback)
 
 
 class RecordingExecutor:
@@ -55,6 +59,9 @@ class CompletedFuture:
     def cancel(self):
         self.cancel_called = True
         return False
+
+    def add_done_callback(self, callback):
+        callback(self)
 
 
 def test_tool_runtime_maps_future_timeout_to_domain_error():
@@ -222,3 +229,123 @@ def test_capacity_must_be_positive(capacity):
             executor=fake_executor,
             capacity=capacity,
         )
+
+
+def test_stats_keep_timed_out_running_future_in_flight():
+    running_future = Future()
+    assert running_future.set_running_or_notify_cancel()
+
+    fake_executor = SequenceExecutor([running_future])
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    with pytest.raises(ToolExecutionTimeoutError):
+        runtime.run(
+            lambda: "unused",
+            timeout_seconds=0,
+        )
+
+    stats = runtime.stats_snapshot()
+
+    assert stats.submitted_total == 1
+    assert stats.caller_timeout_total == 1
+    assert stats.in_flight == 1
+    assert stats.rejected_total == 0
+    assert stats.submit_failed_total == 0
+
+    # Future 真正完成时，回调应将 in_flight 减一。
+    running_future.set_result("late-result")
+
+    stats = runtime.stats_snapshot()
+
+    assert stats.submitted_total == 1
+    assert stats.caller_timeout_total == 1
+    assert stats.in_flight == 0
+
+    # 必须在同一个锁中读取所有字段，否则可能得到“拼接快照
+
+
+def test_stats_record_capacity_rejection():
+    running_future = Future()
+    assert running_future.set_running_or_notify_cancel()
+
+    fake_executor = SequenceExecutor([running_future])
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    with pytest.raises(ToolExecutionTimeoutError):
+        runtime.run(
+            lambda: "first",
+            timeout_seconds=0,
+        )
+
+    with pytest.raises(ToolRuntimeOverloadedError):
+        runtime.run(
+            lambda: "rejected",
+            timeout_seconds=0,
+        )
+
+    stats = runtime.stats_snapshot()
+
+    assert fake_executor.submit_count == 1
+    assert stats.submitted_total == 1
+    assert stats.in_flight == 1
+    assert stats.caller_timeout_total == 1
+    assert stats.rejected_total == 1
+    assert stats.submit_failed_total == 0
+
+    running_future.set_result("late-result")
+
+    assert runtime.stats_snapshot().in_flight == 0
+
+
+def test_stats_record_submit_failure():
+    fake_executor = SequenceExecutor([RuntimeError("submit failed")])
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="submit failed",
+    ):
+        runtime.run(
+            lambda: "unused",
+            timeout_seconds=1,
+        )
+
+    stats = runtime.stats_snapshot()
+
+    assert fake_executor.submit_count == 1
+    assert stats.submitted_total == 0
+    assert stats.in_flight == 0
+    assert stats.caller_timeout_total == 0
+    assert stats.rejected_total == 0
+    assert stats.submit_failed_total == 1
+
+
+def test_stats_completed_future_is_not_in_flight():
+    completed_future = Future()
+    completed_future.set_result("ok")
+
+    fake_executor = SequenceExecutor([completed_future])
+    runtime = ToolRuntime(
+        executor=fake_executor,
+        capacity=1,
+    )
+
+    result = runtime.run(
+        lambda: "unused",
+        timeout_seconds=1,
+    )
+
+    stats = runtime.stats_snapshot()
+
+    assert result == "ok"
+    assert stats.submitted_total == 1
+    assert stats.in_flight == 0

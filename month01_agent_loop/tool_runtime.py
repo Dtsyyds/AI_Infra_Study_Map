@@ -5,9 +5,10 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
+from dataclasses import dataclass
+from threading import BoundedSemaphore, Lock
 
 # BoundedSemaphore 内部维护一个计数器和一个条件变量。
-from threading import BoundedSemaphore
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -21,6 +22,15 @@ class ToolRuntimeOverloadedError(RuntimeError):
     """工具调用超过允许的并发数。"""
 
 
+@dataclass(frozen=True, slots=True)
+class ToolRuntimeStats:
+    in_flight: int
+    submitted_total: int
+    caller_timeout_total: int
+    rejected_total: int
+    submit_failed_total: int
+
+
 class ToolRuntime:
     """
     负责在线程池中执行工具，并应用单步 timeout。
@@ -30,6 +40,12 @@ class ToolRuntime:
     """
 
     def __init__(self, executor: Executor, *, capacity: int | None = None):
+        self._stats_lock = Lock()
+        self._in_flight = 0
+        self._submitted_total = 0
+        self._rejected_total = 0
+        self._submit_failed_total = 0
+        self._caller_timeout_total = 0
         if capacity is not None and capacity < 1:
             raise ValueError("capacity 必须大于等于1")
         self._executor = executor
@@ -39,6 +55,23 @@ class ToolRuntime:
             self._capacity_limiter = BoundedSemaphore(
                 value=capacity
             )  # 每次调用一个新信号量就无法限制多个调用之间的总并发。信号量必须在 __init__() 中创建，并由整个 ToolRuntime 共享。
+
+    def stats_snapshot(self) -> ToolRuntimeStats:
+        with self._stats_lock:
+            return ToolRuntimeStats(
+                in_flight=self._in_flight,
+                submitted_total=self._submitted_total,
+                caller_timeout_total=self._caller_timeout_total,
+                rejected_total=self._rejected_total,
+                submit_failed_total=self._submit_failed_total,
+            )
+
+    def _on_future_done(self, _future) -> None:
+        with self._stats_lock:
+            self._in_flight -= 1
+
+        if self._capacity_limiter is not None:
+            self._capacity_limiter.release()
 
     """
     1. 校验 timeout
@@ -90,22 +123,26 @@ class ToolRuntime:
             # 使用非阻塞方式申请许可。
             permit_acquired = limiter.acquire(blocking=False)  # 背压拒绝而不是进入队列阻塞等待
             if not permit_acquired:
+                with self._stats_lock:
+                    self._rejected_total += 1
                 raise ToolRuntimeOverloadedError("工具运行时容量已满")
 
         try:
             future = self._executor.submit(operation)
         except BaseException:
+            with self._stats_lock:
+                self._submit_failed_total += 1
+
             if permit_acquired:
+                assert limiter is not None
                 limiter.release()
             raise
 
-        if permit_acquired:
-            assert limiter is not None
+        with self._stats_lock:
+            self._submitted_total += 1
+            self._in_flight += 1
 
-            def release_permit(_future):
-                limiter.release()
-
-            future.add_done_callback(release_permit)
+        future.add_done_callback(self._on_future_done)
 
         """
         Future 进入任意终态都会触发回调：
@@ -124,6 +161,8 @@ class ToolRuntime:
             return future.result(timeout=timeout_seconds)
         # TODO 4：捕获 FutureTimeoutError。
         except FutureTimeoutError as exc:
+            with self._stats_lock:
+                self._caller_timeout_total += 1
             # TODO 5：尝试 future.cancel()。
             future.cancel()
             # TODO 6：抛出 ToolExecutionTimeoutError，并保留异常链。
