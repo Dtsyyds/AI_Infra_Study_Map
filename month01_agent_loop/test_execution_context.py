@@ -6,7 +6,7 @@ import pytest
 
 import executor as executor_module
 from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
-from tool_runtime import ToolExecutionTimeoutError
+from tool_runtime import ToolExecutionTimeoutError, ToolRuntimeOverloadedError
 
 
 class FakeClock:
@@ -380,3 +380,49 @@ def test_execute_action_parse_error_does_not_require_tool_fields():
 
     assert result["type"] == "error"
     assert "content" in result
+
+
+class OverloadedToolRuntime:
+    def run(
+        self,
+        operation,
+        *,
+        timeout_seconds,
+    ):
+        raise ToolRuntimeOverloadedError(
+            "工具运行时容量已满",
+        )
+
+
+def test_execute_action_maps_runtime_overload_to_result(
+    monkeypatch,
+):
+    run_tool_count = 0
+
+    def fake_run_tool(
+        *args,
+        **__kwargs,
+    ):
+        nonlocal run_tool_count
+        run_tool_count += 1
+        return "TOOL_OK: should-not-run"
+
+    monkeypatch.setattr(
+        executor_module,
+        "run_tool",
+        fake_run_tool,
+    )
+
+    result = executor_module.execute_action(
+        action_text="Action: calculator(expression='1 + 2 * 4')",
+        context=None,
+        tool_runtime=OverloadedToolRuntime(),
+        step_timeout_seconds=0,
+    )
+
+    assert result == {
+        "type": "overloaded",
+        "content": "工具运行时容量已满",
+        "success": False,
+    }
+    assert run_tool_count == 0

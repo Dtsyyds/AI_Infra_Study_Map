@@ -13,7 +13,7 @@ executor.py
 
 from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from parser import parse_action
-from tool_runtime import ToolExecutionTimeoutError, ToolRuntime
+from tool_runtime import ToolExecutionTimeoutError, ToolRuntime, ToolRuntimeOverloadedError
 from tools import run_tool
 
 
@@ -160,6 +160,12 @@ def execute_action(
                 return {
                     "type": "timeout",
                     "content": "工具执行超时",
+                    "success": False,
+                }
+            except ToolRuntimeOverloadedError:
+                return {
+                    "type": "overloaded",
+                    "content": "工具运行时容量已满",
                     "success": False,
                 }
         else:
