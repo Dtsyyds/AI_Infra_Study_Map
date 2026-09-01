@@ -9,17 +9,43 @@ llm.py
 - 用来测试 Agent Loop 的整体链路
 """
 
+import math
 import os
 import re
+from time import monotonic, sleep
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    InternalServerError,  # HTTP 500
+    OpenAI,
+    RateLimitError,  # HTTP 429
+)
 
 from tools import is_sensitive_path
 
 DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
 
 load_dotenv()
+
+
+def _parse_retry_after_seconds(raw_value: str | None) -> float | None:
+    if raw_value is None:
+        return None
+
+    try:
+        retry_after = float(raw_value)
+    except ValueError:
+        return None
+
+    if not math.isfinite(retry_after) or retry_after < 0:
+        return None
+
+    return retry_after
+
+
+class LLMExecutionTimeoutError(RuntimeError):
+    """LLM 调用耗尽允许的总时间预算。"""
 
 
 class FakerLLM:
@@ -281,6 +307,7 @@ class OpenAICompatibleLLM:
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
+            max_retries=0,  # 禁用 SDK 内部的重试机制
         )
 
     def generate(
@@ -293,13 +320,21 @@ class OpenAICompatibleLLM:
         """
         V7.3 调用真实 LLM, 返回 Thought / Action 文本
         增加简单的重试机制：
-        - 如果第一次 API 调用失败，自动再试一次
+        - 如果第一次 API 调用失败，遇到允许重试的异常，且预算允许时再尝试一次
         - 如果两次都失败，抛出 RuntimeError, 由 agent.py 捕捉
         """
 
         last_error = None
 
+        deadline = None if timeout_seconds is None else monotonic() + timeout_seconds
+
         for attempt in range(2):
+            request_timeout = None if deadline is None else max(0.0, deadline - monotonic())
+            if request_timeout is not None and request_timeout <= 0:
+                raise LLMExecutionTimeoutError(
+                    f"LLM 调用超时，剩余时间 {request_timeout:.2f}s"
+                ) from last_error
+
             try:
                 completion = self.client.chat.completions.create(
                     model=self.model_name,
@@ -320,7 +355,7 @@ class OpenAICompatibleLLM:
                         },
                     ],
                     temperature=0,
-                    timeout=timeout_seconds,
+                    timeout=request_timeout,
                 )
 
                 content = completion.choices[0].message.content
@@ -330,11 +365,36 @@ class OpenAICompatibleLLM:
 
                 return self._clean_output(content)
 
-            except Exception as e:
+            except RateLimitError as e:
+                # 本阶段只识别这一种明确的临时限流。
+                if e.code != "rate_limit_exceeded":
+                    raise
+
+                last_error = e
+
+                # 当前循环是 range(2)：attempt=1 已经是最后一次。
+                if attempt == 1:
+                    break
+
+                # 本阶段先处理有效的秒数形式，异常响应头后续补测试。
+                retry_after = _parse_retry_after_seconds(e.response.headers.get("Retry-After"))
+                if retry_after is None:
+                    retry_after = 1.0  # 默认等待 1 秒
+                # TODO 1：无 deadline 时为 None，否则用当前时钟计算。
+                remaining = None if deadline is None else max(0.0, deadline - monotonic())
+
+                # TODO 2：有时间限制，而且等完后没有正数预算。
+                if remaining is not None and remaining <= retry_after:
+                    raise LLMExecutionTimeoutError("LLM 剩余预算不足以等待限流解除并重试") from e
+
+                # TODO 3：等待服务端要求的时间。
+                sleep(retry_after)
+
+            except (APIConnectionError, InternalServerError) as e:
                 last_error = e
                 print(f"[LLM Error] 第 {attempt + 1} 次调用失败：{e}")
 
-        raise RuntimeError(f"真实 LLM 调用失败，已重试两次，最后一次错误：{last_error}")
+        raise RuntimeError(f"真实 LLM 调用失败，共重试两次，最后一次错误：{last_error}")
 
     def _clean_output(self, text: str) -> str:
         """
