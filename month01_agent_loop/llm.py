@@ -438,7 +438,7 @@ def call_llm(prompt: str, *, timeout_seconds: float | None = (DEFAULT_LLM_TIMEOU
     else:
         llm = FakerLLM()
 
-    return llm.generate(prompt)
+    return llm.generate(prompt, timeout_seconds=timeout_seconds)
 
 
 if __name__ == "__main__":

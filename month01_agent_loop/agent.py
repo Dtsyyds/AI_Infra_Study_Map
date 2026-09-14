@@ -23,7 +23,7 @@ from trace import AgentTrace
 
 from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from executor import execute_action
-from llm import call_llm
+from llm import call_llm, LLMExecutionTimeoutError
 from memory import Memory
 from prompts import build_prompt
 from tool_runtime import ToolRuntime
@@ -170,7 +170,7 @@ class LLMAgent:
         step_timeout_seconds: float | None = None,
         llm_timeout_seconds: float | None = 30,
     ):
-        if llm_timeout_seconds is None and llm_timeout_seconds < 0:
+        if llm_timeout_seconds is not None and llm_timeout_seconds < 0:
             raise ValueError("llm_timeout_seconds 不能为负数")
 
         self.memory = Memory(max_messages=50)
@@ -231,9 +231,23 @@ class LLMAgent:
             # 适配 7.3 修改
             try:
                 effective_llm_timeout = context.effective_timeout_seconds(
-                    step_timeout_seconds=self.step_timeout_seconds
+                    step_timeout_seconds=self.llm_timeout_seconds
                 )
                 llm_output = call_llm(prompt, timeout_seconds=effective_llm_timeout)
+            except LLMExecutionTimeoutError as e:
+                error_msg = f"LLM 调用超时, 错误原因：{e}"
+
+                result = {
+                    "type": "llm_timeout",
+                    "content": error_msg,
+                    "success": False,
+                }
+
+                trace.add_step(step_index=step, llm_output="", action="", result=result)
+                final_answer = f"LLM 调用超时，Agent 已停止执行本次任务。\n错误原因：{e}"
+                trace.finish(final_answer, status="llm_timeout")
+                self.memory.add_ai_message(f"Final Answer: {final_answer}")
+                return final_answer
             except Exception as e:
                 error_msg = f"LLM 调用失败， 错误原因：{e}"
 

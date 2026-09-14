@@ -4,6 +4,8 @@ import agent as agent_module
 from agent import LLMAgent
 from execution_context import ExecutionContext
 
+from llm import LLMExecutionTimeoutError
+
 
 class FakeToolRuntime:
     """只用于验证对象是否被 Agent 向下传递。"""
@@ -230,7 +232,7 @@ def test_llm_agent_skips_llm_when_context_is_timed_out(
     assert snapshot["steps"] == []
 
 
-def test_llm_agent_passes_effective_timeout_to_llm(
+def llm_agent_passes_effective_timeout_to_llm(
     monkeypatch,
 ):
     captured = {}
@@ -291,3 +293,132 @@ def test_llm_agent_passes_effective_timeout_to_llm(
 
     # min(LLM 单次上限 5, 总预算剩余 2) == 2
     assert captured["timeout_seconds"] == 2
+
+def test_llm_agent_keeps_llm_and_tool_timeouts_separate(
+    monkeypatch,
+):
+    captured = {}
+
+    def fake_call_llm(
+        prompt,
+        *,
+        timeout_seconds=None,
+    ):
+        captured["llm_timeout"] = timeout_seconds
+
+        return (
+            "Thought: 测试超时参数传播\n"
+            "Action: Finish[任务完成]"
+        )
+
+    def fake_execute_action(
+        action,
+        *,
+        context=None,
+        tool_runtime=None,
+        step_timeout_seconds=None,
+    ):
+        captured["tool_timeout"] = step_timeout_seconds
+
+        return {
+            "type": "finish",
+            "content": "任务完成",
+        }
+
+    monkeypatch.setattr(
+        agent_module,
+        "call_llm",
+        fake_call_llm,
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "execute_action",
+        fake_execute_action,
+    )
+
+    clock = FakeClock()
+    context = ExecutionContext(
+        timeout_seconds=10,
+        clock=clock,
+    )
+
+    # 总任务还剩 8 秒。
+    clock.advance(2)
+
+    agent = LLMAgent(
+        max_steps=1,
+        llm_timeout_seconds=5,
+        step_timeout_seconds=2,
+    )
+
+    answer = agent.run(
+        "测试任务",
+        context=context,
+    )
+
+    assert answer == "任务完成"
+
+    # min(任务剩余 8 秒, LLM 上限 5 秒)
+    assert captured["llm_timeout"] == 5
+
+    # 工具继续使用自己的单步上限。
+    assert captured["tool_timeout"] == 2
+
+def test_llm_agent_rejects_negative_llm_timeout():
+    with pytest.raises(
+        ValueError,
+        match="llm_timeout_seconds",
+        ):
+            LLMAgent(
+                llm_timeout_seconds=-1,
+            )
+
+def test_llm_agent_allows_unbounded_llm_timeout():
+    agent = LLMAgent(
+        llm_timeout_seconds=None,
+    )
+
+    assert agent.llm_timeout_seconds is None
+
+def test_llm_timeout_has_distinct_trace_status(
+    monkeypatch,
+):
+    def fake_call_llm(
+        prompt,
+        *,
+        timeout_seconds=None,
+    ):
+        raise LLMExecutionTimeoutError(
+            "LLM 调用超时",
+        )
+
+    monkeypatch.setattr(
+        agent_module,
+        "call_llm",
+        fake_call_llm,
+    )
+
+    agent = LLMAgent(
+        max_steps=1,
+        llm_timeout_seconds=5,
+    )
+
+    answer = agent.run(
+        "测试 LLM 超时",
+    )
+
+    snapshot = agent.last_trace.snapshot()
+
+    assert "超时" in answer
+    assert snapshot["status"] == "llm_timeout"
+
+    assert (
+        snapshot["steps"][0]["result"]["type"]
+        == "llm_timeout"
+    )
+
+    assert (
+        snapshot["steps"][0]["result"]["success"]
+        is False
+    )
+

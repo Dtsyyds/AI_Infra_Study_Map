@@ -151,3 +151,42 @@ def test_real_llm_does_not_retry_when_budget_is_exhausted(monkeypatch):
         llm.generate("测试 prompt", timeout_seconds=5)
 
     assert completions.received_timeouts == [5]
+
+def test_call_llm_forwards_timeout_to_backend(
+    monkeypatch,
+):
+    captured = {}
+
+    class RecordingLLM:
+        def generate(
+            self,
+            prompt,
+            *,
+            timeout_seconds=None,
+        ):
+            captured["prompt"] = prompt
+            captured["timeout_seconds"] = timeout_seconds
+            return "测试完成"
+
+    backend = RecordingLLM()
+
+    monkeypatch.setenv(
+        "LLM_MODE",
+        "real",
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "OpenAICompatibleLLM",
+        lambda: backend,
+    )
+
+    result = llm_module.call_llm(
+        "测试 Prompt",
+        timeout_seconds=7,
+    )
+
+    assert result == "测试完成"
+    assert captured["prompt"] == "测试 Prompt"
+    assert captured["timeout_seconds"] == 7
+
+    

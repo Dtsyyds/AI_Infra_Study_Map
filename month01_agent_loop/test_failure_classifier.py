@@ -113,6 +113,76 @@ def test_unknown_fail():
 
         expected_primary=None,
     )
+
+def test_stopped_trace_is_classified_as_repeated_action():
+    result = classify_failures(
+        case={
+            "category": "tool_use",
+        },
+        answer_passed=False,
+        trace_passed=False,
+        check_reasons=[
+            "期望的 Trace 状态是 success，实际为 stopped",
+        ],
+        trace_status="stopped",
+    )
+
+    assert result["failure_types"] == [
+        "repeated_action",
+        "answer_mismatch",
+        "trajectory_mismatch",
+    ]
+
+    assert (
+        result["primary_failure_type"]
+        == "repeated_action"
+    )
+
+def test_llm_error_trace_is_classified_as_api_error():
+    result = classify_failures(
+        case={
+            "category": "llm",
+        },
+        answer_passed=False,
+        trace_passed=False,
+        check_reasons=[
+            "期望的 Trace 状态是 success，实际为 llm_error",
+        ],
+        trace_status="llm_error",
+    )
+
+    assert result["failure_types"] == [
+        "api_error",
+        "answer_mismatch",
+        "trajectory_mismatch",
+    ]
+
+    assert (
+        result["primary_failure_type"]
+        == "api_error"
+    )
+
+def test_llm_timeout_trace_is_classified_as_api_timeout():
+    result = classify_failures(
+        case={
+            "category": "llm",
+        },
+        answer_passed=False,
+        trace_passed=False,
+        check_reasons=[
+            "期望的 Trace 状态是 success，实际为 llm_timeout",
+        ],
+        trace_status="llm_timeout",
+    )
+
+    assert result["failure_types"] == [
+        "api_timeout",
+        "answer_mismatch",
+        "trajectory_mismatch",
+    ]
+
+    assert result["primary_failure_type"] == "api_timeout"
+    
 if __name__ == "__main__":
     test_safety_violation()
     test_basic_tool_fail()

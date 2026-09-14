@@ -1,0 +1,155 @@
+1. LLMAgent.run() 中，为什么既有 self.memory，又要为每次请求创建新的 task_memory？
+self.memory 是作为当前系统中的历史记忆做记忆保存；task_memory 作为当前任务的记忆保存，在查看历史记忆 observation 时避免受到其他任务历史记忆的干扰。
+2. parse_action() 与 execute_action() 分别负责什么？为什么不应该合并？
+parse_action 是从 llm 的输出结果中提取 action 指令，例如 Action: calculator(expression="1 + 2 * 4")；execute_action() 则是根据上述的解析结果选择对应的调用工具和输入参数。他俩之间不合并是方便解析和执行工具的解耦。解析只负责解析，执行只用于执行。
+3. 工具返回 TOOL_ERROR 时，为什么 Executor 仍然返回 type="observation"，而不是直接结束 Agent？
+返回 TOOL_ERROR 有多种可能，包括参数原因以及工具调用原因，对于这些错误将错误原因返回给 agent, 对错误原因加入到 observation 做进一步思考看 agent 是否能正确处理。只有 action 解析到未知类型才会直接 结束。
+4. eval.py 只检查最终答案够不够？为什么还需要检查工具调用路径和 Trace？
+不能只检查最终答案，有可能会出现那种 llm 直接输出最终答案没有调用应该使用的工具这种情况，所以需要加上检查工具调用路径和 Trace
+
+1. 这是 load_text_file() 返回的内容
+{
+    "text": "文档内容",
+    "metadata": {
+        "source_path": "month02_rag_agent/docs/example.md",
+        "file_name": "example.md",
+    },
+}
+source_path：是读取的文件的绝对路径，而 file_name 反应的只是文件名，因此对于不同文件夹下的同名文件无法区分，会被记录多次
+2. build_document_index() 实现的是应用编排层，是功能层面的整理，实现的方式就是功能块函数的堆砌
+LocalEmbedder() 是 Embedding 模型封装的类，是作为具体的模块。他俩解耦避免了修改应用层影响到模块u封装，同时修改embedder不会影响到 build_document_index
+3.save_index() 写入i失败，build_document_index() 返回 None 即可，最后由 CLI 边界统一转换为退出码
+4.为了保证前后转换查询语义向量统一，o如果查询换了另一种，要么维度不统一无法查询，要么查询出来的结果不具备参考性，无法客观反映他们的相关性
+
+1. build_document_index() 捕获并抛出异常，然后u由 CLI 层将异常转换为用户提示和进程退出码
+2. 不太h清楚这个问题，对 FastAPI 服务的 HTTP 状态码不太清楚这是什么
+3. 至少需要包含以下：文件不存在，目录路径有问题，沙盒权限问题等
+
+1. build_document_index() 接受实例化的 Embedder() 是因为业务函数h只使用已经创建好的对象，main() 接受的是负责创建对象的可调用对象
+2. main() 的工作周期和时间由自己管理，如果传入创建好的对象，则可能无法进行独立测试验证, 单元测试和CI因为已经有的初始配置无法正常验证后续功能
+3. Factory 被调用两次说明进行了两次独立的切片a编码，会因为参数的不统一导致后续无法正确进行检索
+
+LLM 决定“做什么”，Agent Loop 决定“下一步做什么”，ExecutionContext 决定“这一步现在是否仍被允许执行”。后者属于 Agent Runtime，而不是模型智能。
+llm 是大语言模型，他是主要的h思考者和决策者，agent_loop 给 llm 提供基础外围设施给 llm 提供输入信息的封装和输出的解析并调用对应的工具执行。ExecutionContext 决定“这一步现在是否仍被允许执行”，是一个动作的行动许可，允许执行权限执行时间。
+
+LLM 是概率式生成模型，根据当前上下文生成下一步动作建议，但它本身不执行工具，也不保证动作安全。Agent Loop 负责组装上下文、调用 LLM、解析输出、分发工具并维护循环状态。ExecutionContext 属于 Agent Runtime，保存一次任务的 deadline 和取消状态，在每次关键操作前判断动作是否仍允许执行。最终执行权属于 Runtime，而不是 LLM。
+
+为什么 future.result(timeout=...) 不能终止工具？
+等待方收到 TimeoutError；
+Future 仍然通常处于 RUNNING；
+工作线程仍被占用；
+之后还可以再次调用 future.result() 取得最终结果。
+
+为什么这里的 future.cancel() 返回 False？
+如果 4 个 worker 都被超时工具占用，第 5 个任务会发生什么？
+2. 任务已经被线程取走并开始运行。它通常只能取消“仍在队列中、尚未开始”的任务。
+3. 第五个任务进入队列等待，标准 ThreadPoolExecutor 的任务队列默认没有业务层容量限制，因此第 5、6、100 个任务都可能继续排队，引发排队延迟和内存增长，而不是返回 503/busy
+Future.result(timeout) 只限制调用方等待时间，不改变 Future 的执行状态。任务开始后，cancel() 通常返回 False，工作线程会继续运行。若线程池全部被阻塞，后续任务会进入队列，因此 Runtime 还必须实现有界并发和背压。
+
+为什么工具超时不能马上自动重试？
+为什么 cancelled 不应该统计为普通 error？
+Agent 调用方已经收到 timeout，工作线程是否一定停止了？
+调用方的等待时间超过预算并返回 timeout，但 Future 和工作线程不一定停止；任务可能仍处于运行状态。这里限制的是墙钟等待时间，其中可能包含排队、调度、I/O 和计算时间。
+
+1. 工具超时后，工具线程仍然可能在运行，在第一次运行未停止的时候，立马i重试第二次，无法确保其中发生什么
+2. cancelled 是因为用户或者上层信号控制停止， error 是系统发生故障
+3. 不是，只是任务超过了允许的运算时间
+
+为什么不能在每次 execute_action() 时创建线程池？
+为什么 future.result(timeout=1) 后，with ThreadPoolExecutor() 仍可能等待 10 秒？
+max_workers=4 时，第 5 个任务会被拒绝吗？
+shutdown(cancel_futures=True) 能否终止已经运行的工具？
+
+1. execute_action()创建线程池，那么在工具线程阻塞或者 其他原因退出时，主线程仍在等待，a频繁创建和销毁线程，u调度开销，难以统计总体并发，无法实施统一背压，关闭时容易泄漏资源
+2. ThreadPoolExecutor.__exit__() 默认执行：shutdown(wait=True)
+3. 不会被拒绝，只代表最多 4 个任务同时在线程中运行,后面的任务进入内部队列等待，默认队列i么有容量上限
+4. 已经i开始的任务不能被强制杀死，只能取消队列中尚未开始的任务
+
+max_workers=4，capacity=6，前 6 个任务分别处于什么状态？第 7 个任务如何处理？
+调用方 future.result(timeout=1) 超时，但工具线程仍在运行，此时为什么不能释放容量许可？
+容量许可应该在 run() 的 finally 中释放，还是在 Future 的完成回调中释放？为什么？
+如果已经获取容量许可，但 executor.submit() 自己抛出异常，许可应该什么时候释放？
+submit() 抛异常时，应在包围 submit() 的 except 中释放，而不是整个 run() 的 finally 中释放。原因是 finally 无论成功、失败、超时都会执行。如果调用方超时但 Future 仍在运行，finally 会过早释放许可；Future 真正完成时回调又释放一次，造成双重释放。
+获取许可
+
+try:
+    future = executor.submit(operation)
+except BaseException:
+    # Future 没有创建成功，不会有完成回调
+    立即释放许可
+    raise
+
+# Future 创建成功后，许可的所有权转交给 Future
+future.add_done_callback(完成后释放许可)
+
+等待 future.result(...)
+
+1. 前 4 个任务进入运行工作状态,后面两个进入内部的等待队列,第 7 个被拒绝
+2. 此时工作线程仍在运行,释放后下一个任务执行,会造成不确定的中间过程和结果,调用方超时后，如果提前释放许可，会破坏 running + queued <= capacity 的容量不变量。不一定马上多出一个正在运行的线程，因为还受 max_workers 限制；但会错误接收新任务，让实际在途任务数超过容量。
+3. 在 future 的完成回调中释放,在上一个任务完全完成后,工作线程结束,可以开启下一个任务,所以此时释放容量许可,完成回调不仅处理正常结束，还处理：工具正常返回；工具抛出异常；排队中的 Future 被成功取消。这些状态都意味着 Future 已进入终态，可以释放许可。
+
+调用方超时，但后台 Future 仍在运行时，in_flight 应该是 0 还是 1？
+容量满导致任务被拒绝时，submitted_total 是否应该增加？
+executor.submit() 抛异常时，in_flight 是否应该增加？
+为什么这些指标不能直接用普通整数随意修改，而需要 Lock 保护？
+
+| 指标                     | 类型      | 含义                       |
+| ---------------------- | ------- | ------------------------ |
+| `in_flight`            | Gauge   | 已提交但 Future 尚未结束的任务数     |
+| `submitted_total`      | Counter | 成功提交给 Executor 的总数       |
+| `rejected_total`       | Counter | 因容量已满被拒绝的总数              |
+| `submit_failed_total`  | Counter | `executor.submit()` 失败总数 |
+| `caller_timeout_total` | Counter | 调用方等待 Future 超时总数        |
+
+1. in_flight 是 1, 属于已提交但 Future 尚未结束的任务
+2. submitted_total 不增加, 没有成功提交给 Executor
+3. in_flight 不增加, future = self._executor.submit(operation),此时 Future 还未提交成功,
+4. ToolRuntime 的指标可能同时被不同线程修改：多个调用线程同时执行 run()；Executor 工作线程完成任务后触发 Future 回调；监控线程同时读取指标快照。
+
+暂时不要修改代码，先判断下面哪些错误应该重试，并说明理由：
+网络临时断开，抛出 APIConnectionError。
+服务端返回 HTTP 429。
+服务端返回 HTTP 500。
+请求参数错误，返回 HTTP 400。
+API Key 错误，返回 HTTP 401。
+我们的代码出现 TypeError。
+已经抛出 LLMExecutionTimeoutError。
+OpenAI(...) 应设置 max_retries=0 还是保留默认值？
+
+判断标准不是“发生了异常就重试”，而是：
+
+这个错误是否可能在不修改请求的情况下短暂恢复？
+重试是否仍在总时间预算内？
+这是下游瞬时故障，还是配置、输入、代码自身的确定性错误？
+
+网络临时断开,服务端返回,这种网络相关的错误可以二次重试,请求参数错误，返回 HTTP 400。
+API Key 错误，返回 HTTP 401。我们的代码出现 TypeError。已经抛出 LLMExecutionTimeoutError。
+这种错误不需要重试.max_retries=0
+
+本地回退的基础等待窗口是 1 秒，每次重试翻倍，上限 4 秒。第 1、2、3、4 次重试的窗口上限分别是多少？
+服务端明确要求 Retry-After: 6，但本地退避上限是 4 秒。这时能不能只等 4 秒？如果总预算只剩 3 秒，应该怎样处理？
+加入随机等待后，测试每次可能得到不同结果。我们已经替换了时钟和 sleep，还应该控制哪个依赖，才能精确断言等待时间和第二次请求的预算？
+
+1. 1s 2s 4s 4s
+2. 不能只等 4s
+\
+状态流转
+从 queued 开始，任务有哪些合法的状态变化？每次变化应该由提交接口负责，还是由 worker 负责？
+容量边界
+已经有 2 个任务正在运行，等待队列为空，而且运行中的任务暂时不会结束。此时再连续提交 4 个任务，分别应该怎样处理？系统中“正在运行＋等待执行”最多是多少个？
+数据怎么组织
+队列负责决定“下一个执行谁”，任务表负责通过 task_id 查询状态。
+你会让队列保存什么？任务表的键和值分别是什么？为什么任务执行完成后，不能立即把查询记录一起删除？
+
+状态不是几个可以任意切换的标签。第一版约定：
+
+提交成功：创建 queued 记录。
+worker 取到任务：改成 running。
+执行结束：根据结果改成 succeeded 或 failed。
+已完成的任务不重新排队；重试作为新任务提交，暂不实现。
+
+任务表的值也不能只有状态，还要有结果和错误信息。否则客户端只能知道“成功了”，却拿不到结果。
+
+你说的“没有空 worker 才进入队列”，我们稍作简化：所有任务统一入队，由空闲 worker 取走。 提交端不用另外判断哪个 worker 空闲。
+
+注意：5 是运行与等待任务的数量上限，不保证任何时刻连续提交 5 次都成功。如果 worker 尚未取走任务，容量为 3 的队列也可能先满。

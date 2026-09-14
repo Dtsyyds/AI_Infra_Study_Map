@@ -58,6 +58,12 @@ FAILURE_PRIORITY = [
     "unknown",
 ]
 
+TRACE_STATUS_TO_FAILURE_TYPE = {
+    "stopped": "repeated_action",
+    "llm_error": "api_error",
+    "llm_timeout": "api_timeout",
+}
+
 def percentile(values: List[float], ratio: float) -> float:
     """
     计算百分位数
@@ -184,6 +190,7 @@ def run_stability_eval(cases: List[Dict[str, Any]], runs: int, max_steps: int) -
                 answer_passed=result.get("answer_passed", False),
                 trace_passed=result.get("trace_passed", False),
                 check_reasons=result.get("check_reasons", []),
+                trace_status=result.get("trace_summary",{},).get("trace_status", None),
             )
             result.update(classification)
             print(
@@ -239,6 +246,8 @@ def build_case_summary(
         else 0.0
     )
 
+    # api_timeout_runs = 0
+
     tool_path_counter = Counter()
     primary_failure_counter = Counter()
 
@@ -257,6 +266,16 @@ def build_case_summary(
 
         if primary_failure:
             primary_failure_counter[primary_failure] += 1
+
+        # if primary_failure == "api_timeout":
+        #     api_timeout_runs += 1
+
+    api_timeout_runs = primary_failure_counter.get("api_timeout", 0,)
+    api_timeout_rate = (
+        api_timeout_runs / total_runs
+        if total_runs > 0
+        else 0.0
+    )
     
     return {
         "case_id": case.get("id"),
@@ -269,6 +288,8 @@ def build_case_summary(
         "p95_duration_seconds": round(percentile(durations, 0.95), 3),
         "tool_paths": dict(tool_path_counter),
         "primary_failure_types": dict(primary_failure_counter),
+        "api_timeout_runs": api_timeout_runs,
+        "api_timeout_rate": api_timeout_rate,
     }
 
 def choose_primary_failure_type(failure_types):
@@ -281,8 +302,17 @@ def choose_primary_failure_type(failure_types):
         
     return "unknown"
 
-def classify_failures(case, answer_passed, trace_passed, check_reasons):
+def classify_failures(case, answer_passed, trace_passed, check_reasons, trace_status: str | None = None, ):
     failure_types = []
+
+    # if trace_status == "stopped":
+    #     failure_types.append("repeated_action")
+    # elif trace_status == "llm_error":
+    #     failure_types.append("api_error")
+
+    status_failure_type = TRACE_STATUS_TO_FAILURE_TYPE.get(trace_status)
+    if status_failure_type:
+        failure_types.append(status_failure_type)
 
     category = case.get("category", "general")
     
@@ -377,14 +407,32 @@ def build_stability_summary(cases, results):
         ],
     }
 
-def determine_exit_code(summary: dict) -> int:
+def determine_exit_code(summary, *, max_failed_runs=0, max_api_timeout_rate=None,) -> int:
     """
     根据稳定性测评摘要决定进程退出码
 
     所有运行结果均为通过时，退出码为0
     否则，退出码为1
     """
-    return 0 if summary["failed_runs"] == 0 else 1
+    # return 0 if summary["failed_runs"] == 0 else 1
+    if max_failed_runs is not None:
+        failed_runs = summary.get(
+            "failed_runs", 0
+        )
+
+        if failed_runs > max_failed_runs:
+            return 1
+
+    if max_api_timeout_rate is not None:
+        api_timeout_rate = summary.get(
+            "api_timeout_rate", 0.0
+        )
+
+        if api_timeout_rate > max_api_timeout_rate:
+            return 1
+
+    return 0
+
 
 
 def main() -> int:
