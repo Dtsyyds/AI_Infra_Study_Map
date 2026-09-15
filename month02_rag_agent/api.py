@@ -9,10 +9,16 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ConfigDict
 from uuid import uuid4
-from time import perf_counter
+from time import perf_counter, sleep
 
 from month02_rag_agent.app import build_document_index
 from month02_rag_agent.embedder import LocalEmbedder
+
+from dataclasses import asdict
+from functools import partial
+
+from month02_rag_agent.task_manager import TaskManager, TaskQueueFullError
+
 
 logger = logging.getLogger(__name__)
 # __name__ 会使用当前模块名，例如 month02_rag_agent.api
@@ -46,6 +52,58 @@ class ServerBusyError(RuntimeError):
     """
 
 
+class CreateTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=2000)
+    delay_seconds: int = Field(default=2.0, ge=0.0, le=10.0)
+
+
+class CreateIndexTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    input_path: str = Field(min_length=1, description="输入文档路径")
+    output_path: str = Field(min_length=1, description="输出索引路径")
+    chunk_size: int = Field(gt=0, description="每个文档的分块大小")
+    overlap: int = Field(ge=0, description="分块之间的重叠大小")
+
+
+def demo_task_operation(
+    text: str,
+    delay_seconds: float,
+) -> dict[str, str]:
+    # 这个同步函数由 TaskManager 放在线程中执行。
+    sleep(delay_seconds)
+    return {"echo": text}
+
+
+def build_index_task(
+    payload: CreateIndexRequest,
+    *,
+    embedder: LocalEmbedder,
+    index_build_slots: BoundedSemaphore,
+) -> dict:
+    # 等待并取得索引构建槽位，with 语句自动 acquire 和 release
+    with index_build_slots:
+        index = build_document_index(
+            input_path=payload.input_path,
+            output_path=payload.output_path,
+            chunk_size=payload.chunk_size,
+            overlap=payload.overlap,
+            embedder=embedder,
+        )
+
+        index_summary = IndexSummary(
+            status="created",
+            output_path=payload.output_path,
+            schema_version=index["schema_version"],
+            model=index["model"],
+            dimension=index["dimension"],
+            normalized=index["normalized"],
+            record_count=len(index["records"]),
+        )
+
+    return index_summary.model_dump(mode="json")  # 转换成 JSON 可序列化的字典
+
+
 # 使用 lifespan 管理 Embedder
 def create_app(
     *,
@@ -64,12 +122,24 @@ def create_app(
         app.state.index_build_slots = BoundedSemaphore(
             value=max_concurrent_index_builds
         )
-        embedder = embedder_factory()
-        app.state.embedder = embedder
+
+        app.state.embedder = embedder_factory()
+
+        manager = TaskManager(
+            worker_count=2,
+            queue_capacity=3,
+        )
+
+        app.state.task_manager = manager
+        manager.start()
 
         try:
             yield
         finally:
+            # 先处理完任务，再清理可能被任务使用的资源。
+            await manager.close()
+
+            app.state.task_manager = None
             app.state.embedder = None
             app.state.index_build_slots = None
 
@@ -231,6 +301,31 @@ def create_app(
                 content={"status": "ready"},
             )
 
+    @app.get("/v1/tasks/{task_id}")
+    async def get_task(
+        task_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        manager = request.app.state.task_manager
+        try:
+            record = manager.get_task(task_id)
+        except KeyError:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "error": {
+                        "code": "TASK_NOT_FOUND",
+                        "message": f"任务 {task_id} 不存在",
+                    }
+                },
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=asdict(record),  # asdict(record) 把任务记录转换成字典
+            headers={"Cache-Control": "no-store"},
+        )
+
     # 添加 POST /v1/indexs 路由
     @app.post(
         "/v1/indexes",
@@ -273,6 +368,71 @@ def create_app(
             )
         finally:
             index_build_slots.release()
+
+    @app.post("/v1/tasks", status_code=status.HTTP_202_ACCEPTED)
+    async def create_task(
+        payload: CreateTaskRequest,
+        request: Request,
+    ) -> JSONResponse:
+        manager = request.app.state.task_manager
+
+        operation = partial(
+            demo_task_operation,
+            text=payload.text,
+            delay_seconds=payload.delay_seconds,
+        )  # ：绑定参数，得到一个以后再执行的零参数函数
+
+        try:
+            task_id = manager.submit(operation)
+        except TaskQueueFullError:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "TASK_QUEUE_FULL",
+                        "message": "任务队列已满，请稍后重试",
+                    }
+                },
+            )
+
+        status_url = f"/v1/tasks/{task_id}"
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"task_id": task_id, "status_url": status_url},
+            headers={"Location": status_url},
+        )
+
+    @app.post("/v1/index-tasks", status_code=status.HTTP_202_ACCEPTED)
+    async def create_index_task(
+        payload: CreateIndexTaskRequest,
+        request: Request,
+    ) -> JSONResponse:
+        manager = request.app.state.task_manager
+        operation = partial(
+            build_index_task,
+            payload=payload,
+            embedder=request.app.state.embedder,
+            index_build_slots=request.app.state.index_build_slots,
+        )
+        try:
+            task_id = manager.submit(operation)
+        except TaskQueueFullError:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "TASK_QUEUE_FULL",
+                        "message": "任务队列已满，请稍后重试",
+                    }
+                },
+            )
+
+        status_url = f"/v1/tasks/{task_id}"
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"task_id": task_id, "status_url": status_url},
+            headers={"Location": status_url},
+        )
 
     return app
 

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "index_config": {
+    "source": "month02_rag_agent/docs/agent_infra.md",
+    "chunk_size": 200,
+    "overlap": 40
+  },
+  "cases": [
+    {
+      "id": "sandbox-purpose",
+      "query": "沙盒的主要作用是什么？",
+      "relevant_ids": [
+        "month02_rag_agent/docs/agent_infra.md::chunk_0002"
+      ]
+    },
+    {
+      "id": "trace-records",
+      "query": "Trace 记录了哪些信息？",
+      "relevant_ids": [
+        "month02_rag_agent/docs/agent_infra.md::chunk_0003"
+      ]
+    },
+    {
+      "id": "eval-purpose",
+      "query": "eval 模块用于做什么？",
+      "relevant_ids": [
+        "month02_rag_agent/docs/agent_infra.md::chunk_0004"
+      ]
+    }
+  ]
+}

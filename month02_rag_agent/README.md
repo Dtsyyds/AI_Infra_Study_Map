@@ -267,3 +267,26 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
 可以用下面四句话概括本模块：
 
 > 我实现了一条最小 RAG 链路，将文档切分、向量索引、相似度检索、LLM 生成和引用校验串联起来。系统在没有有效上下文时不会调用 LLM，在引用不合法时进行有限重试并安全拒答。主接口返回答案和结构化 Trace，可观测检索数量、最高分、LLM 调用次数、引用重试和最终状态。最后通过单元测试、CLI 冒烟测试与全量回归验证这条链路，共有 66 项测试通过。
+
+## 离线检索质量评测
+
+检索评测链路：
+
+1. 加载版本化评测集；
+2. 加载向量索引；
+3. 对查询生成 Embedding；
+4. 执行 Top-K 检索；
+5. 计算 Recall@K 和 MRR；
+6. 原子保存 JSON 报告；
+7. 根据质量阈值返回进程退出码。
+
+运行方式：
+
+```bash
+python3 -m month02_rag_agent.retrieval_eval \
+  month02_rag_agent/eval_questions.json \
+  month02_rag_agent/data/agent_infra_index.json \
+  month02_rag_agent/eval_results/retrieval_report.json \
+  --top-k 3 \
+  --min-recall-at-k 0.8 \
+  --min-mrr 0.7

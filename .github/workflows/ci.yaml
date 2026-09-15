@@ -61,12 +61,15 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: month01_agent_loop/requirements-dev.txt
+          cache-dependency-path: |
+            month01_agent_loop/requirements-dev.txt
+            month02_rag_agent/requirements.txt
 
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r month01_agent_loop/requirements-dev.txt
+          python -m pip install -r month02_rag_agent/requirements.txt
 
       - name: Run Ruff static analysis
         run: python -m ruff check month02_rag_agent

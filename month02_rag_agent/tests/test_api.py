@@ -676,3 +676,51 @@ def test_index_capacity_is_released_after_unexpected_error(
 
     # 内部异常不能泄露到客户端。
     assert "simulated index build failure" not in first_response.text
+
+def test_async_task_contract_returns_202_and_can_be_polled():
+    app = create_app(embedder_factory=FakeEmbedder)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/v1/tasks",
+            json={
+                "text": "异步任务完成",
+                "delay_seconds": 0,
+            },
+        )
+
+        assert create_response.status_code == 202
+
+        create_body = create_response.json()
+        task_id = create_body["task_id"]
+        status_url = create_body["status_url"]
+
+        assert UUID(task_id)
+        assert status_url == f"/v1/tasks/{task_id}"
+        assert create_response.headers["Location"] == status_url
+
+        # 后台任务完成时间不确定，所以进行有限次数轮询。
+        for _ in range(100):
+            status_response = client.get(status_url)
+
+            assert status_response.status_code == 200
+            assert status_response.headers["Cache-Control"] == "no-store"
+
+            task = status_response.json()
+
+            if task["status"] in {"succeeded", "failed"}:
+                break
+
+            assert task["status"] in {"queued", "running"}
+            threading.Event().wait(0.01)
+        else:
+            pytest.fail("后台任务没有在规定时间内结束")
+
+    assert task == {
+        "task_id": task_id,
+        "status": "succeeded",
+        "result": {
+            "echo": "异步任务完成",
+        },
+        "error": None,
+    }
