@@ -44,6 +44,10 @@ class PagedKVCache:
     @property
     def capacity_tokens(self) -> int:
         return self._capacity_tokens
+
+    @property
+    def block_size(self) -> int:
+        return self._block_size
     
     @property
     def total_blocks(self) -> int:
@@ -69,6 +73,11 @@ class PagedKVCache:
     def allocated_tokens(self) -> int:
         """ 当前缓存总共分配了多少 Token。 """
         return self.used_blocks * self._block_size
+
+    @property
+    def used_tokens(self) -> int:
+        """ 当前缓存总共使用了多少 Token。 """
+        return self.logical_tokens + (self.allocated_tokens - self.logical_tokens)
 
     def logical_tokens_for(self, request_id: str) -> int:
         """ 返回请求拥有的有效 Token 数。 """

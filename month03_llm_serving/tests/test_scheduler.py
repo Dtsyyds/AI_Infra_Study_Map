@@ -1,6 +1,7 @@
 from month03_llm_serving.request_queue import InferenceRequest
 from month03_llm_serving.scheduler import (
     BatchScheduler,
+    PreemptionPolicy,
     RequestKVCacheTooLargeError,
     RequestPhase,
     RequestState,
@@ -374,3 +375,154 @@ def test_scheduler_exposes_paged_kv_allocation():
     assert scheduler.kv_cache_used_tokens == 0
     assert scheduler.kv_cache_allocated_tokens == 0
     assert scheduler.kv_cache_reserved_tokens == 0
+
+def test_request_state_preemption_recomputes_without_losing_output_progress():
+    request = InferenceRequest(
+        request_id = "A",
+        prompt_tokens = 4,
+        max_new_tokens = 4,
+        arrived_at = 0.0,
+    )
+
+    state = RequestState(request)
+
+    # 初始 Prefill：处理4个Prompt Token并生成第一个输出Token。
+    assert state.run_prefill() == 4
+    assert state.phase == RequestPhase.DECODE
+    assert state.generated_tokens == 1
+
+    # 第一次Decode后，一共已经生成两个输出Token。
+    state.run_decode_step()
+    assert state.generated_tokens == 2
+
+    # KV被释放，但已经产生的输出不能丢失。
+    state.preempt_for_recompute()
+
+    assert state.phase == RequestPhase.PREFILL
+    assert state.generated_tokens == 2
+    assert state.prefilled_tokens == 0
+
+    # 重建下一次Decode所需要的KV：
+    # prompt 4 + 已生成Token 2 - 尚未写入KV的最后一个Token 1
+    assert state.remaining_prefill_tokens == 5
+
+    # Recompute只是重建KV，不能额外生成输出Token。
+    assert state.run_prefill() == 5
+    assert state.phase == RequestPhase.DECODE
+    assert state.generated_tokens == 2
+
+def test_scheduler_preempts_request_and_recomputes_it_later():
+    scheduler = BatchScheduler(
+        max_active_requests=2,
+        queue_capacity=2,
+        max_batch_tokens=10,
+        kv_cache_capacity_tokens=8,
+    )
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="A",
+            prompt_tokens=4,
+            max_new_tokens=4,
+            arrived_at=0.0,
+        )
+    )
+
+    # A完成首次Prefill：
+    # 实际KV=4，峰值预留=4+4-1=7。
+    assert scheduler.step() == []
+    assert scheduler.active_request_ids == ("A",)
+    assert scheduler.kv_cache_used_tokens == 4
+    assert scheduler.kv_cache_reserved_tokens == 7
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="B",
+            prompt_tokens=2,
+            max_new_tokens=1,
+            arrived_at=1.0,
+        )
+    )
+
+     # A预留7/8，B峰值需要2，因此B暂时不能激活。
+    # 本轮A完成一次Decode，已有两个输出Token。
+    assert scheduler.step() == []
+    assert scheduler.waiting_count == 1
+    assert scheduler.active_request_ids == ("A",)
+    assert scheduler.kv_cache_used_tokens == 5
+
+    # 手动抢占A：保留生成进度，但释放实际KV和峰值预留。
+    scheduler.preempt("A")
+
+    assert scheduler.active_request_ids == ()
+    assert scheduler.preempted_request_ids == ("A",)
+    assert scheduler.kv_cache_used_tokens == 0
+    assert scheduler.kv_cache_reserved_tokens == 0
+
+    # 新请求优先，B获得资源并立即完成。
+    assert scheduler.step() == ["B"]
+    assert scheduler.preempted_request_ids == ("A",)
+    assert scheduler.kv_cache_used_tokens == 0
+
+    # A重新激活，重建：
+    # prompt 4 + generated 2 - 1 = 5个KV Token。
+    assert scheduler.step() == []
+    assert scheduler.active_request_ids == ("A",)
+    assert scheduler.preempted_request_ids == ()
+    assert scheduler.kv_cache_used_tokens == 5
+    assert scheduler.kv_cache_reserved_tokens == 7
+
+    # A继续Decode，不重复生成之前的两个Token。
+    assert scheduler.step() == []
+    assert scheduler.step() == ["A"]
+
+    assert scheduler.active_count == 0
+    assert scheduler.kv_cache_used_tokens == 0
+    assert scheduler.kv_cache_reserved_tokens == 0
+
+def test_scheduler_automatically_preempts_last_decode_request():
+    scheduler = BatchScheduler(
+        max_active_requests=3,
+        queue_capacity=3,
+        max_batch_tokens=10,
+        kv_cache_capacity_tokens=10,
+        preemption_policy=PreemptionPolicy.RECOMPUTE_LAST,
+    )
+
+    for request_id in ("A", "C"):
+        scheduler.submit(
+            InferenceRequest(
+                request_id=request_id,
+                prompt_tokens=3,
+                max_new_tokens=3,
+                arrived_at=0.0,
+            )
+        )
+
+    # A和C都完成Prefill。
+    # 每个请求峰值预留：3 + 3 - 1 = 5。
+    assert scheduler.step() == []
+    assert scheduler.active_request_ids == ("A", "C")
+    assert scheduler.kv_cache_used_tokens == 6
+    assert scheduler.kv_cache_reserved_tokens == 10
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="B",
+            prompt_tokens=2,
+            max_new_tokens=1,
+            arrived_at=1.0,
+        )
+    )
+
+    # B需要2个KV Token，但容量已经全部被A和C预留。
+    # 自动抢占最后进入的C，然后B运行并完成。
+    assert scheduler.step() == ["B"]
+
+    assert scheduler.active_request_ids == ("A",)
+    assert scheduler.preempted_request_ids == ("C",)
+    assert scheduler.waiting_count == 0
+
+    # A本轮完成了一次Decode：实际KV由3增加到4。
+    assert scheduler.kv_cache_used_tokens == 4
+    assert scheduler.kv_cache_reserved_tokens == 5

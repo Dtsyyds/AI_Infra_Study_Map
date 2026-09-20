@@ -1,12 +1,19 @@
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum
 
 from month03_llm_serving.request_queue import InferenceRequest, RequestQueue
-from month03_llm_serving.kv_cache import KVCache
-from month03_llm_serving.paged_kv_cache import PagedKVCache
+
+from month03_llm_serving.paged_kv_cache import PagedKVCache, PagedKVCacheFullError
 
 class RequestKVCacheTooLargeError(ValueError):
     """ 超过系统容量 """
+
+class PreemptionPolicy(str, Enum):
+    # KV不足时继续等待，保持现有行为
+    NONE = "none"
+    # 抢占最后进入的、处于DECODE阶段的活跃请求
+    RECOMPUTE_LAST = "recompute_last"
 
 class RequestPhase(str, Enum):
     PREFILL = "prefill"
@@ -20,10 +27,21 @@ class RequestState:
     generated_tokens: int = 0
     prefilled_tokens: int = 0
 
+    # 这两个字段是运行期内部状态，不允许调用者在构造时传入。
+    prefill_target_tokens: int = field(init=False)
+    is_recomputing: bool = field(
+        default=False,
+        init=False,
+    )
+
+    def __post_init__(self):
+        # 首次 Prefill 只需要处理原始 Prompt
+        self.prefill_target_tokens = self.request.prompt_tokens
+
     @property
     def remaining_prefill_tokens(self) -> int:
         return (
-            self.request.prompt_tokens
+            self.prefill_target_tokens
             - self.prefilled_tokens
         )
     
@@ -54,7 +72,13 @@ class RequestState:
             return processed_tokens
 
         # 全部 Prompt 处理完成，得到首个输出 Token。
-        self.generated_tokens = 1
+        # self.generated_tokens = 1
+        if self.is_recomputing:
+            # Recompute 只重建 KV，不生成新的输出 Token。
+            self.is_recomputing = False
+        else:
+            # 首次 Prefill 完成时生成首个输出 Token。
+            self.generated_tokens = 1
 
         if (
             self.generated_tokens
@@ -65,6 +89,7 @@ class RequestState:
             self.phase = RequestPhase.DECODE
 
         return processed_tokens
+        
 
     def run_decode_step(self):
         if self.phase != RequestPhase.DECODE:
@@ -79,6 +104,21 @@ class RequestState:
         ):
             self.phase = RequestPhase.FINISHED
 
+    def preempt_for_recompute(self):
+        if self.phase != RequestPhase.DECODE:
+            raise RuntimeError(
+                "只有 DECODE 状态可以执行 preempt_for_recompute"
+            )
+        # 已生成最后一个 Token 尚未写入 KV，因此需要减一。
+        self.prefill_target_tokens = (
+            self.request.prompt_tokens + self.generated_tokens - 1
+        )
+
+        # KV 已经释放,从头计算进度
+        self.prefilled_tokens = 0
+        self.is_recomputing = True
+        self.phase = RequestPhase.PREFILL
+
 class BatchScheduler:
     def __init__(
             self,
@@ -87,7 +127,8 @@ class BatchScheduler:
             queue_capacity: int,
             max_batch_tokens: int,
             kv_cache_capacity_tokens: int,
-            kv_cache_block_size: int = 1
+            kv_cache_block_size: int = 1,
+            preemption_policy: PreemptionPolicy = PreemptionPolicy.NONE,
     ):
         if (
             isinstance(max_active_requests, bool)
@@ -121,6 +162,24 @@ class BatchScheduler:
             capacity_tokens = kv_cache_capacity_tokens,
             block_size=kv_cache_block_size,
         )
+        self._preempted_states: deque[RequestState] = deque()
+        try:
+            self._preemption_policy = PreemptionPolicy(
+                preemption_policy,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "preemption_policy 必须是 PreemptionPolicy "
+            )from exc
+
+    def _select_preemption_victim(
+            self,
+    ) -> RequestState | None:
+        for state in reversed(self._request_states):
+            if state.phase == RequestPhase.DECODE:
+                return state
+        return None
+
 
     def submit(self, request: InferenceRequest) -> None:
         required_kv_tokens = request.prompt_tokens + request.max_new_tokens - 1
@@ -154,12 +213,8 @@ class BatchScheduler:
         return self._last_step_token_count
 
     @property
-    def kv_cache_used_tokens(self) -> int:
-        return self._kv_cache.used_tokens
-
-    @property
     def kv_cache_reserved_tokens(self) -> int:
-        return self._kv_reservations.used_tokens
+        return self._kv_reservations.logical_tokens
 
     @property
     def kv_cache_used_tokens(self) -> int:
@@ -170,8 +225,32 @@ class BatchScheduler:
         return self._kv_cache.allocated_tokens
 
     @property
-    def kv_cache_reserved_tokens(self) -> int:
-        return self._kv_reservation_pool.logical_tokens
+    def preempted_count(self) -> int:
+        return len(self._preempted_states)
+
+    @property
+    def preempted_request_ids(self) -> tuple[str, ...]:
+        return tuple(
+            state.request.request_id
+            for state in self._preempted_states
+        )
+
+    def preempt(self, request_id: str) -> None:
+        for index, state in enumerate(self._request_states):
+            if state.request.request_id != request_id:
+                continue
+
+            # 先转换状态；如果当前状态不能抢占，
+            # preempt_for_recompute会在释放资源前抛错。
+            state.preempt_for_recompute()
+            self._kv_cache.release(request_id)
+            self._kv_reservations.release(request_id)
+            del self._request_states[index]
+            self._preempted_states.append(state)
+            return
+            
+        raise KeyError(f"活跃请求不存在: {request_id}")
+
 
     def step(self) -> list[str]:
         self._last_step_token_count = 0
@@ -187,23 +266,95 @@ class BatchScheduler:
                 -1
             )
 
-            if (
-                required_kv_tokens > self._kv_reservations.available_tokens
-            ):
-                break
+            # if (
+            #     required_kv_tokens > self._kv_reservations.available_tokens
+            # ):
+            #     break
+            try:
+                self._kv_reservations.append_tokens(
+                    request.request_id,
+                    required_kv_tokens,
+                )
+
+            except PagedKVCacheFullError:
+                # 当前 KV 容量不足，请求继续留在等待队列。
+                if (
+                    self._preemption_policy
+                    != PreemptionPolicy.RECOMPUTE_LAST
+                ):
+                    break
+
+                victim = self._select_preemption_victim()
+
+                if victim is None:
+                    break
+
+                self.preempt(
+                    victim.request.request_id,
+                )
+
+                # 等待请求仍在队首。
+                # 释放受害者资源后，重新尝试为它预留。
+
+                continue
 
             request = self._request_queue.pop_next()
 
-            self._kv_reservations.append_tokens(
-                request.request_id,
-                required_kv_tokens,
-            )
+            # self._kv_reservations.append_tokens(
+            #     request.request_id,
+            #     required_kv_tokens,
+            # )
 
             self._request_states.append(
                 RequestState(
                     request = request,
                 )
             )
+
+        while(
+            self.active_count < self._max_active_requests
+            and self.preempted_count > 0
+        ):
+            state = self._preempted_states[0]
+            request = state.request
+
+            required_kv_tokens = (
+                request.prompt_tokens
+                + request.max_new_tokens
+                -1
+            )
+
+            try:
+                self._kv_reservations.append_tokens(
+                    request.request_id,
+                    required_kv_tokens,
+                )
+            except PagedKVCacheFullError:
+                break
+                # # 当前 KV 容量不足，请求继续留在等待队列。
+                # if (
+                #     self._preemption_policy
+                #     != PreemptionPolicy.RECOMPUTE_LAST
+                # ):
+                #     break
+
+                # victim = self._select_preemption_victim()
+
+                # if victim is None:
+                #     break
+
+                # self.preempt(
+                #     victim.request.request_id,
+                # )
+
+                # 等待请求仍在队首。
+                # 释放受害者资源后，重新尝试为它预留。
+
+                # continue
+
+            # 只有预留成功后才能移动状态
+            self._preempted_states.popleft()
+            self._request_states.append(state)
 
         finished_ids: list[str] = []
         remaining_states: list[RequestState] = []
@@ -218,6 +369,8 @@ class BatchScheduler:
                 remaining_states.append(state)
                 continue
 
+            request_id = state.request.request_id
+
             if state.phase == RequestPhase.PREFILL:
                 # processed_tokens = state.run_prefill(
                 #     max_tokens=remaining_budget,
@@ -225,15 +378,15 @@ class BatchScheduler:
                 planned_tokens = min(
                     state.remaining_prefill_tokens,
                     remaining_budget,
-                    self._kv_cache.available_tokens,
+                    # self._kv_cache.available_tokens,
                 )
 
-                if planned_tokens <= 0:
-                    remaining_states.append(state)
-                    continue
+                # if planned_tokens <= 0:
+                #     remaining_states.append(state)
+                #     continue
 
                 self._kv_cache.append_tokens(
-                    state.request.request_id,
+                    request_id,
                     planned_tokens,
                 )
 
@@ -242,12 +395,12 @@ class BatchScheduler:
                 )
             
             elif state.phase == RequestPhase.DECODE:
-                if self._kv_cache.available_tokens < 1:
-                    remaining_states.append(state)
-                    continue
+                # if self._kv_cache.available_tokens < 1:
+                #     remaining_states.append(state)
+                #     continue
 
                 self._kv_cache.append_tokens(
-                    state.request.request_id,
+                    request_id,
                     1,
                 )
                 state.run_decode_step()
