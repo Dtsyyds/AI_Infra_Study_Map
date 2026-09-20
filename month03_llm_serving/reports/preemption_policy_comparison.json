@@ -1,0 +1,40 @@
+{
+  "comparison": {
+    "extra_recomputed_tokens": 3,
+    "makespan_delta_steps": 1,
+    "short_request_latency_delta_steps": -2
+  },
+  "policies": {
+    "none": {
+      "completion_steps": {
+        "A": 2,
+        "B": 3,
+        "C": 2
+      },
+      "latency_steps": {
+        "A": 3,
+        "B": 3,
+        "C": 3
+      },
+      "steps_executed": 4,
+      "total_preemptions": 0,
+      "total_recomputed_tokens": 0
+    },
+    "recompute_last": {
+      "completion_steps": {
+        "A": 2,
+        "B": 1,
+        "C": 4
+      },
+      "latency_steps": {
+        "A": 3,
+        "B": 1,
+        "C": 5
+      },
+      "steps_executed": 5,
+      "total_preemptions": 1,
+      "total_recomputed_tokens": 3
+    }
+  },
+  "unit": "scheduler_step"
+}

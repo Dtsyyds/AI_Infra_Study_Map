@@ -526,3 +526,107 @@ def test_scheduler_automatically_preempts_last_decode_request():
     # A本轮完成了一次Decode：实际KV由3增加到4。
     assert scheduler.kv_cache_used_tokens == 4
     assert scheduler.kv_cache_reserved_tokens == 5
+
+def test_scheduler_reports_preemption_and_recompute_cost():
+    scheduler = BatchScheduler(
+        max_active_requests=1,
+        queue_capacity=1,
+        max_batch_tokens=10,
+        kv_cache_capacity_tokens=8,
+    )
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="A",
+            prompt_tokens=4,
+            max_new_tokens=4,
+            arrived_at=0.0,
+        )
+    )
+
+    # 首次 Prefill：4 个 Token，不属于重计算。
+    assert scheduler.step() == []
+    # Decode 一步，此时 generated_tokens == 2。
+    assert scheduler.step() == []
+
+    assert scheduler.total_preemptions == 0
+    assert scheduler.total_recomputed_tokens == 0
+
+    scheduler.preempt("A")
+
+    assert scheduler.total_preemptions == 1
+    assert scheduler.total_recomputed_tokens == 0
+
+    # 重建所需上下文：
+    # prompt 4 + 已生成 2 - 1 = 5
+    assert scheduler.step() == []
+
+    assert scheduler.total_preemptions == 1
+    assert scheduler.total_recomputed_tokens == 5
+    assert scheduler.kv_cache_used_tokens == 5
+
+def test_scheduler_does_not_repeatedly_preempt_same_request():
+    scheduler = BatchScheduler(
+        max_active_requests=3,
+        queue_capacity=3,
+        max_batch_tokens=10,
+        kv_cache_capacity_tokens=6,
+        preemption_policy=PreemptionPolicy.RECOMPUTE_LAST,
+        max_preemptions_per_request=1,
+    )
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="A",
+            prompt_tokens=3,
+            max_new_tokens=3,
+            arrived_at=0.0,
+        )
+    )
+
+    # A 首次 Prefill，峰值预留为：
+    # 3 + 3 - 1 = 5
+    assert scheduler.step() == []
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="B",
+            prompt_tokens=2,
+            max_new_tokens=1,
+            arrived_at=1.0,
+        )
+    )
+
+     # 容量只有 6，A 预留 5，B 需要 2。
+    # 自动抢占 A，B 随后完成。
+    assert scheduler.step() == ["B"]
+    assert scheduler.total_preemptions == 1
+    assert scheduler.preempted_request_ids == ("A",)
+
+    # A 恢复并重建 KV。
+    assert scheduler.step() == []
+    assert scheduler.active_request_ids == ("A",)
+
+    scheduler.submit(
+        InferenceRequest(
+            request_id="C",
+            prompt_tokens=2,
+            max_new_tokens=1,
+            arrived_at=2.0,
+        )
+    )
+
+    # C 同样暂时无法获得预留空间。
+    # 但 A 已经达到一次抢占上限，不能再次抢占。
+    assert scheduler.step() == []
+
+    assert scheduler.total_preemptions == 1
+    assert scheduler.active_request_ids == ("A",)
+    assert scheduler.waiting_count == 1
+
+    # A 得以完成并释放资源。
+    assert scheduler.step() == ["A"]
+    assert scheduler.total_preemptions == 1
+
+    # 随后 C 获得资源并完成。
+    assert scheduler.step() == ["C"]

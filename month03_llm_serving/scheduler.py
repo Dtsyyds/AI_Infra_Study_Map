@@ -33,6 +33,10 @@ class RequestState:
         default=False,
         init=False,
     )
+    preemption_count: int = field(
+        default=0,
+        init=False,
+    )
 
     def __post_init__(self):
         # 首次 Prefill 只需要处理原始 Prompt
@@ -129,6 +133,7 @@ class BatchScheduler:
             kv_cache_capacity_tokens: int,
             kv_cache_block_size: int = 1,
             preemption_policy: PreemptionPolicy = PreemptionPolicy.NONE,
+            max_preemptions_per_request: int = 1,
     ):
         if (
             isinstance(max_active_requests, bool)
@@ -171,14 +176,16 @@ class BatchScheduler:
             raise ValueError(
                 "preemption_policy 必须是 PreemptionPolicy "
             )from exc
-
-    def _select_preemption_victim(
-            self,
-    ) -> RequestState | None:
-        for state in reversed(self._request_states):
-            if state.phase == RequestPhase.DECODE:
-                return state
-        return None
+        self._total_preemptions = 0
+        self._total_recomputed_tokens = 0
+        if(
+            isinstance(max_preemptions_per_request, bool)
+            or not isinstance(max_preemptions_per_request, int)
+            or max_preemptions_per_request < 1
+        ):
+            raise ValueError(
+                "max_preemptions_per_request 必须是正整数")
+        self._max_preemptions_per_request = max_preemptions_per_request
 
 
     def submit(self, request: InferenceRequest) -> None:
@@ -235,6 +242,14 @@ class BatchScheduler:
             for state in self._preempted_states
         )
 
+    @property
+    def total_preemptions(self) -> int:
+        return self._total_preemptions
+
+    @property
+    def total_recomputed_tokens(self) -> int:
+        return self._total_recomputed_tokens
+
     def preempt(self, request_id: str) -> None:
         for index, state in enumerate(self._request_states):
             if state.request.request_id != request_id:
@@ -247,10 +262,26 @@ class BatchScheduler:
             self._kv_reservations.release(request_id)
             del self._request_states[index]
             self._preempted_states.append(state)
+            state.preemption_count += 1
+            self._total_preemptions += 1
             return
             
         raise KeyError(f"活跃请求不存在: {request_id}")
 
+    def _select_preemption_victim(
+            self,
+    ) -> RequestState | None:
+        for state in reversed(self._request_states):
+            if state.phase != RequestPhase.DECODE:
+                continue
+
+            if (
+                state.preemption_count >= self._max_preemptions_per_request
+            ):
+                continue
+
+            return state
+        return None
 
     def step(self) -> list[str]:
         self._last_step_token_count = 0
@@ -390,9 +421,16 @@ class BatchScheduler:
                     planned_tokens,
                 )
 
+                was_recomputing = state.is_recomputing
+
                 processed_tokens = state.run_prefill(
                     max_tokens=planned_tokens,
                 )
+
+                if was_recomputing:
+                    self._total_recomputed_tokens += (
+                        processed_tokens
+                    )
             
             elif state.phase == RequestPhase.DECODE:
                 # if self._kv_cache.available_tokens < 1:
