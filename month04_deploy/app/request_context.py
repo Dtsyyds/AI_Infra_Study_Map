@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from collections.abc import Callable
 
 class RequestPhase(str, Enum):
     ACTIVE = "active"
@@ -108,6 +109,14 @@ class RequestContext:
         default=None,
         repr=False,
     )
+    capacity_releaser: (
+        Callable[["RequestContext"], None] | None
+    ) = None
+
+    outcome_recorder: (
+        Callable[[RequestOutcome], None] | None
+    ) = None
+
 
 
     permit_acquired: bool = False

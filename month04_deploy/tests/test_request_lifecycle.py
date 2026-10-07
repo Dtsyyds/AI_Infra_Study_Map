@@ -27,6 +27,9 @@ from month04_deploy.app.stream_consumer import (
     iter_stream_jsonl
 )
 
+from month04_deploy.app.admission import AdmissionController
+from month04_deploy.app.metrics import ServiceMetrics
+
 @pytest.mark.asyncio
 async def test_completed_claims_success():
     loop = asyncio.get_running_loop()
@@ -192,21 +195,28 @@ async def test_loser_waits_until_winner_finishes_cleanup():
 @pytest.mark.asyncio
 async def test_cancelled_request_stops_task_and_releases_resources():
     loop = asyncio.get_running_loop()
+    metrics = ServiceMetrics()
 
-    queue_semaphore = asyncio.BoundedSemaphore(1)
-    execution_semaphore = asyncio.BoundedSemaphore(1)
-
-    await queue_semaphore.acquire()
-    await execution_semaphore.acquire()
+    controller = AdmissionController(
+        max_running=1,
+        max_waiting=1,
+        metrics=metrics,
+    )
 
     ctx = RequestContext(
-            request_id="req-006",
-            deadline=loop.time() + 10,
-            queue_semaphore = queue_semaphore,
-            execution_semaphore = execution_semaphore,
-            queue_slot_acquired = True,
-            permit_acquired = True,
-        )
+        request_id="req-006",
+        deadline=loop.time() + 10,
+    )
+
+    # 必须通过真实准入路径获得容量。
+    admitted = await controller.try_admit(ctx)
+
+    assert admitted is True
+    assert ctx.permit_acquired is True
+    assert ctx.queue_slot_acquired is False
+    assert metrics.registry.get_sample_value(
+        "agent_running_requests"
+    ) == 1
 
     ctx.background_task = asyncio.create_task(
         asyncio.sleep(10)
@@ -214,25 +224,43 @@ async def test_cancelled_request_stops_task_and_releases_resources():
 
     finalized_by_me = await finalize_request(
         ctx,
-        FinalizeEvent.CLIENT_DISCONNECTED,    
+        FinalizeEvent.CLIENT_DISCONNECTED,
         cleanup_request_resources,
     )
 
+    assert finalized_by_me is True
     assert ctx.cancel_event.is_set() is True
-    assert ctx.background_task.cancelled() is True
+    assert ctx.background_task.done()
+    assert ctx.background_task.cancelled()
 
+    # 生产者真正退出以后，容量和 Gauge 才归零。
     assert ctx.queue_slot_acquired is False
     assert ctx.permit_acquired is False
 
-    assert queue_semaphore.locked() is False
-    assert execution_semaphore.locked() is False
+    assert metrics.registry.get_sample_value(
+        "agent_waiting_requests"
+    ) == 0
+    assert metrics.registry.get_sample_value(
+        "agent_running_requests"
+    ) == 0
 
-    assert ctx.phase is RequestPhase.FINALIZED
-    assert ctx.finalized_event.is_set() is True
+    # 不读取 Semaphore 的私有 _value，
+    # 而是通过“下一个请求能否获得名额”验证资源已经释放。
+    next_ctx = RequestContext(
+        request_id="req-007",
+        deadline=loop.time() + 10,
+    )
 
-    assert finalized_by_me is True
-    assert ctx.finalize_winner is FinalizeEvent.CLIENT_DISCONNECTED
-    assert ctx.outcome is RequestOutcome.CANCELLED
+    next_admitted = await controller.try_admit(next_ctx)
+
+    assert next_admitted is True
+    assert next_ctx.permit_acquired is True
+
+    controller.release_capacity(next_ctx)
+
+    assert metrics.registry.get_sample_value(
+        "agent_running_requests"
+    ) == 0
 
 @pytest.mark.asyncio
 async def test_external_disconnect_cancels_running_agent():
@@ -655,5 +683,74 @@ async def test_disconnect_cancels_producer_blocked_on_full_queue():
 
         await asyncio.gather(
             producer_task,
+            return_exceptions=True,
+        )
+
+@pytest.mark.asyncio
+async def test_outcome_recorded_only_after_cleanup_finishes():
+    loop = asyncio.get_running_loop()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    metrics = ServiceMetrics()
+
+    ctx = RequestContext(
+        request_id="outcome-timing",
+        deadline=loop.time() + 10,
+        outcome_recorder=metrics.record_request_outcome,
+    )
+
+    async def blocking_cleanup(
+        cleanup_ctx: RequestContext,
+    ) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+
+    finalize_task = asyncio.create_task(
+        finalize_request(
+            ctx,
+            FinalizeEvent.CLIENT_DISCONNECTED,
+            blocking_cleanup,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(
+            cleanup_started.wait(),
+            timeout=1,
+        )
+
+        # outcome 已经确定，但请求仍处于 FINALIZING。
+        assert ctx.outcome is RequestOutcome.CANCELLED
+        assert ctx.phase is RequestPhase.FINALIZING
+
+        # 清理没有完成，因此不能提前累计。
+        assert metrics.registry.get_sample_value(
+            "agent_request_outcomes_total",
+            {"outcome": "cancelled"},
+        ) == 0
+
+        allow_cleanup.set()
+
+        finalized_by_me = await asyncio.wait_for(
+            finalize_task,
+            timeout=1,
+        )
+
+        assert finalized_by_me is True
+        assert ctx.phase is RequestPhase.FINALIZED
+
+        assert metrics.registry.get_sample_value(
+            "agent_request_outcomes_total",
+            {"outcome": "cancelled"},
+        ) == 1
+
+    finally:
+        allow_cleanup.set()
+
+        if not finalize_task.done():
+            finalize_task.cancel()
+
+        await asyncio.gather(
+            finalize_task,
             return_exceptions=True,
         )

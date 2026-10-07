@@ -97,6 +97,14 @@ async def finalize_request(
 
         # 这里不能持有state_lock
         await cleanup(ctx)
+        # 只有清理成功返回，才算完成一次业务请求。
+        if ctx.outcome is None:
+            raise RuntimeError(
+                "finalizing request has no outcome"
+            )
+
+        if ctx.outcome_recorder is not None:
+            ctx.outcome_recorder(ctx.outcome)
     finally:
         async with ctx.state_lock:
             ctx.phase = RequestPhase.FINALIZED
@@ -125,18 +133,21 @@ async def cleanup_request_resources(
         except asyncio.CancelledError:
             pass
 
-    # 先释放队列容量
-    if (
-        ctx.queue_slot_acquired
-        and ctx.queue_semaphore is not None
-    ):
-        ctx.queue_semaphore.release()
-        ctx.queue_slot_acquired = False
+    # # 先释放队列容量
+    # if (
+    #     ctx.queue_slot_acquired
+    #     and ctx.queue_semaphore is not None
+    # ):
+    #     ctx.queue_semaphore.release()
+    #     ctx.queue_slot_acquired = False
 
-    # Permit最后释放
-    if (
-        ctx.permit_acquired
-        and ctx.execution_semaphore is not None
-    ):
-        ctx.execution_semaphore.release()
-        ctx.permit_acquired = False
+    # # Permit最后释放
+    # if (
+    #     ctx.permit_acquired
+    #     and ctx.execution_semaphore is not None
+    # ):
+    #     ctx.execution_semaphore.release()
+    #     ctx.permit_acquired = False
+    # 必须位于 await 后台任务退出之后。
+    if ctx.capacity_releaser is not None:
+        ctx.capacity_releaser(ctx)

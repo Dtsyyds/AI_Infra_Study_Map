@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
+from collections.abc import AsyncIterator, Callable, AsyncGenerator
 
 from .request_context import FinalizeEvent, RequestContext
 from .request_lifecycle import (
@@ -9,7 +10,7 @@ from .request_lifecycle import (
 
 StreamingAgentCall = Callable[
     [str, RequestContext],
-    AsyncIterator[str],
+    AsyncGenerator[str, None],
 ]
 
 async def run_streaming_agent_request(
@@ -24,13 +25,13 @@ async def run_streaming_agent_request(
 
         chunks: list[str] = []
 
-        async for token in agent_stream(prompt, ctx):
-            if ctx.cancel_event.is_set():
-                raise asyncio.CancelledError
+        async with aclosing(agent_stream(prompt, ctx)) as stream:
+            async for token in stream:
+                if ctx.cancel_event.is_set():
+                    raise asyncio.CancelledError
 
-            # 队列满时在这里阻塞，从而向Agent生产者传播反压
-            await queue.put(token)
-            chunks.append(token)
+                await queue.put(token)
+                chunks.append(token)
 
     except asyncio.CancelledError:
         # 外部终结者负责清理，不能再次调用finalize_request

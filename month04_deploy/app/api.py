@@ -1,6 +1,7 @@
 import asyncio
 import math
-from collections.abc import AsyncIterator
+from contextlib import aclosing
+from collections.abc import AsyncIterator, AsyncGenerator
 from uuid import uuid4
 
 from fastapi import FastAPI, Request as FastAPIRequest, Response
@@ -24,6 +25,12 @@ from .stream_runner import StreamingAgentCall
 from fastapi import HTTPException
 
 from .admission import AdmissionController
+from .metrics import ServiceMetrics, QueueWaitResult
+
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 
 class AgentRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=10_000)
@@ -45,14 +52,14 @@ _OUTCOME_TO_HTTP_STATUS = {
 async def default_fake_agent(
     prompt: str,
     ctx: RequestContext,
-) -> str:
+) -> AsyncGenerator[str, None]:
     await asyncio.sleep(0.01)
-    return f"echo:{prompt}"
+    yield f"echo:{prompt}"
 
 async def default_fake_streaming_agent(
         prompt: str,
         ctx: RequestContext,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     for token in ("收到：", prompt, "，", "处理完成。"):
         await asyncio.sleep(0.2)
         yield token
@@ -85,32 +92,97 @@ def create_app(
         )
     app = FastAPI(title="Month04 Agent Service")
 
-    app.add_middleware(ActiveRequestLimitMiddleware, max_active=max_active)
+    metrics = ServiceMetrics()
+    app.state.metrics = metrics
+
+    app.add_middleware(ActiveRequestLimitMiddleware, max_active=max_active, metrics=metrics)
 
     controller = AdmissionController(
         max_running=max_running,
         max_waiting=max_waiting,
+        metrics=metrics
     )
+
+    app.state.metrics = metrics
+
+    async def wait_for_execution_with_metrics(
+        ctx: RequestContext,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+
+        result: QueueWaitResult = "error"
+
+        try:
+            await controller.wait_for_execution(ctx)
+
+        except asyncio.CancelledError:
+            # 由你填写 result。
+            result = "cancelled"
+            raise
+
+        else:
+            # 由你填写 result。
+            result = "acquired"
+
+        finally:
+            metrics.observe_queue_wait(
+                started_at=started_at,
+                finished_at=loop.time(),
+                result=result,
+            )
 
     async def limited_agent_call(
         prompt: str,
         ctx: RequestContext,
     ) -> str:
-        await controller.wait_for_execution(ctx)
-        return await agent_call(prompt, ctx)
+        await wait_for_execution_with_metrics(ctx)
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            result = await agent_call(prompt, ctx)
+        finally:
+            finished_at = loop.time()
+            metrics.observe_producer_duration(
+                started_at, finished_at)
+        return result
 
     async def limited_agent_stream(
             prompt: str,
             ctx: RequestContext,
-    ) -> AsyncIterator[str]:
-        await controller.wait_for_execution(ctx)
+    ) -> AsyncGenerator[str, None]:
+        await wait_for_execution_with_metrics(ctx)
 
-        async for token in agent_stream(prompt, ctx):
-            yield token
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+
+        try:
+            async with aclosing(agent_stream(prompt, ctx)) as stream:
+                async for token in stream:
+                    yield token
+
+        finally:
+            # 补充：记录一次生产者耗时。
+            # 执行到这里之前，内层生成器的关闭已经完成。
+            finished_at = loop.time()
+            metrics.observe_producer_duration(
+                started_at, finished_at)
+
+
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get(
+        "/metrics",
+        include_in_schema=False,
+    )
+    async def prometheus_metrics() -> Response:
+        return Response(
+            content=generate_latest(metrics.registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
     @app.post(
         "/v1/agent/run",
@@ -126,9 +198,14 @@ def create_app(
         ctx = RequestContext(
             request_id=uuid4().hex,
             deadline=loop.time() + request.timeout_seconds,
+            outcome_recorder=metrics.record_request_outcome,
         )
 
         if not await controller.try_admit(ctx):
+            metrics.record_admission_rejection(
+                "capacity_exceeded"
+            )
+
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -193,11 +270,15 @@ def create_app(
                 + response_timeout_seconds
             ),
             stream_queue=asyncio.Queue(maxsize=8),
+            outcome_recorder=metrics.record_request_outcome,
         )
 
         admitted = await controller.try_admit(ctx)
 
         if not admitted:
+            metrics.record_admission_rejection(
+                "capacity_exceeded"
+            )
             raise HTTPException(
                 status_code=503,
                 detail={

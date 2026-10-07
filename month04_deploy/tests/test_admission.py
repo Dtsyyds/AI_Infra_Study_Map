@@ -11,7 +11,7 @@ from month04_deploy.app.request_lifecycle import (
     cleanup_request_resources,
     finalize_request,
 )
-
+from month04_deploy.app.metrics import ServiceMetrics
 
 def make_context(request_id: str) -> RequestContext:
     return RequestContext(
@@ -22,9 +22,11 @@ def make_context(request_id: str) -> RequestContext:
 
 @pytest.mark.asyncio
 async def test_capacity_limit_and_queue_promotion():
+    metrics = ServiceMetrics()
     controller = AdmissionController(
         max_running=1,
         max_waiting=1,
+        metrics=metrics
     )
 
     first = make_context("first")
@@ -100,9 +102,11 @@ async def test_capacity_limit_and_queue_promotion():
 
 @pytest.mark.asyncio
 async def test_cancelled_waiter_releases_queue_slot():
+    metrics = ServiceMetrics()
     controller = AdmissionController(
         max_running=1,
         max_waiting=1,
+        metrics=metrics,
     )
 
     first = make_context("first")
