@@ -52,9 +52,9 @@ _OUTCOME_TO_HTTP_STATUS = {
 async def default_fake_agent(
     prompt: str,
     ctx: RequestContext,
-) -> AsyncGenerator[str, None]:
+) -> str:
     await asyncio.sleep(0.01)
-    yield f"echo:{prompt}"
+    return f"echo:{prompt}"
 
 async def default_fake_streaming_agent(
         prompt: str,

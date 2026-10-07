@@ -19,6 +19,30 @@ from month04_deploy.app.stream_response import (
 
 
 @pytest.mark.asyncio
+async def test_default_app_run_smoke():
+    app = create_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/agent/run",
+            json={
+                "prompt": "hello",
+                "timeout_seconds": 1,
+            },
+        )
+
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["outcome"] == "succeeded"
+    assert body["result"] == "echo:hello"
+    assert body["error"] is None
+
+
+@pytest.mark.asyncio
 async def test_api_success():
     async def fake_agent(
         prompt: str,
