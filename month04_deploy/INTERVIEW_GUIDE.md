@@ -129,8 +129,96 @@ HTTP 响应头一旦发送就不能修改。若超时发生在部分 Token 已�
 不看代码，尝试回答：
 
 1. 一个请求从进入中间件到释放 active slot 经历了哪些阶段？
+
+请求进入 ASGI Middleware
+→ 判断是否为受保护接口
+→ 开始记录 HTTP 总耗时
+→ 检查 active 容量
+    ├─ 已满：记录 active_limit，返回 503
+    └─ 未满：获得 active slot，active Gauge +1
+→ 进入路由
+→ 创建 RequestContext
+→ AdmissionController.try_admit()
+    ├─ execution permit 可用：running Gauge +1，直接执行
+    ├─ execution 满但 queue slot 可用：waiting Gauge +1，等待
+    └─ 两者都满：记录 capacity_exceeded，返回 503
+→ 排队请求获得 execution permit
+    → running Gauge +1
+    → 释放 queue slot，waiting Gauge -1
+→ Agent 生产
+→ 完成/超时/断连/异常竞争终结权
+→ 唯一终结者等待清理完成
+→ 释放 execution permit，running Gauge -1
+→ 发送完整响应
+→ self.app(...) 完整返回
+→ 释放 active slot，active Gauge -1
+→ 记录 HTTP 总耗时
+
 2. 完成和 Deadline 同时到达时，为什么只能有一个终结者？
+
+如果每条路径都各自取消任务和释放 Semaphore，就会产生重复释放、状态覆盖或 Gauge 变成负数。
+因此我把请求状态定义为：
+
+```text
+ACTIVE -> FINALIZING -> FINALIZED
+```
+
+所有终结事件都调用同一个 `try_claim_finalize()`。它使用 `asyncio.Lock` 原子地完成状态检查和迁移，只有一个调用者能成为终结者。锁只保护短暂状态变更，不在持锁期间等待后台任务，从而避免死锁。
+
+唯一终结者发出取消后，会 `await` 后台任务真正退出，然后再释放 queue slot 和 execution permit。因为 `task.cancel()` 只是投递取消请求，并不代表协程的 `finally` 已执行完成。
+
+asyncio.Lock 不是用来保护整个清理过程，而是原子地完成“检查 ACTIVE 状态并迁移到 FINALIZING”。获得迁移权的协程成为唯一终结者；其他协程不能重复取消、释放资源或覆盖终态。
+
 3. 排队取消时，waiting Gauge 在哪里归零？
+
+waiting Gauge 在 AdmissionController.wait_for_execution() 的 finally 中，通过 release_queue_slot(ctx) 归零。这样排队成功和排队取消两条路径都会退出 waiting 状态
+
 4. 为什么慢客户端最终会让生产者阻塞？
+
+客户端慢,发送变慢,导致队列堆积,生产者阻塞在 await queue.put()，从而把压力反向传递到生产端，防止 Token 在内存中无限累积
+
+客户端读取变慢
+→ ASGI send() 变慢
+→ Consumer 取 Token 变慢
+→ 有界队列逐渐填满
+→ Producer 阻塞在 await queue.put(token)
+→ 生产速度被消费速度限制
+
+对于有界队列：
+- 队列未满：立即放入。
+- 队列已满：当前协程挂起。
+- Consumer 取走元素：生产者重新获得运行机会。
+这就是背压，不需要额外轮询队列长度。
+
 5. 哪些指标可以相互校验，哪些指标不能直接相加？
+
+在单进程、没有正在处理的请求，并且进程没有重启时，可以校验：
+
+agent_http_request_duration_seconds_count=sum(agent_request_outcomes_total)+sum(agent_admission_rejections_total)
+
+容量 Gauge 可以校验范围：
+0 <= active_requests <= max_active
+0 <= running_requests <= max_running
+0 <= waiting_requests <= max_waiting
+
+系统空闲后应满足：
+active_requests == 0
+running_requests == 0
+waiting_requests == 0
+
+以下内容不能直接相加：
+- HTTP 总耗时和生产者耗时
+- 生产者耗时和发送耗时
+- 不同 Histogram 的 P95
+- Gauge 当前值和 Counter 累计值
+- 不同结果集合的平均延迟
+原因包括：
+1. 生产和发送会重叠。
+2. 生产者可能因背压等待 Consumer。
+3. 不同 Histogram 的样本集合不同。
+4. 分位数本身不可加。
+5. Gauge 是瞬时状态，Counter 是累计事件。
+
 6. 如果部署 4 个 Uvicorn Worker，现有容量和指标语义会发生什么变化？
+
+每个 Worker 的进程内容量独立，因此理论总执行容量可能扩大四倍，但它不是严格的全局容量限制，实际利用率取决于负载均衡；现有 Prometheus 指标也会从服务级语义退化为 Worker 级语义。
