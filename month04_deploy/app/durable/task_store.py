@@ -5,6 +5,11 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .idempotency import (
+    IdempotencyConflictError,
+    build_request_fingerprint,
+)
+
 
 class TaskStore:
     def __init__(self, dsn: str):
@@ -182,3 +187,86 @@ class TaskStore:
                 rows = cur.fetchall()
 
         return rows
+
+    def create_task_idempotent(
+        self,
+        task_type: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """创建任务，或复用相同 key、相同内容的已有任务。"""
+
+        if (
+            not isinstance(idempotency_key, str)
+            or not 1 <= len(idempotency_key) <= 128
+        ):
+            raise ValueError("idempotency_key 长度必须为 1～128")
+
+        fingerprint = build_request_fingerprint(
+            task_type,
+            payload,
+        )
+
+        insert_sql = """
+            INSERT INTO tasks (
+                task_id,
+                task_type,
+                payload,
+                idempotency_key,
+                request_fingerprint
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING *
+        """
+
+        select_sql = """
+            SELECT *
+            FROM tasks
+            WHERE idempotency_key = %s
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 1：
+                # 执行 insert_sql，参数依次为：
+                # uuid4()、task_type、Jsonb(payload)、
+                # idempotency_key、fingerprint。
+                # fetchone() 的结果赋给 row。
+                # raise NotImplementedError("完成 TODO 1")
+                cur.execute(
+                    insert_sql,
+                    (
+                        uuid4(),
+                        task_type,
+                        Jsonb(payload),
+                        idempotency_key,
+                        fingerprint,
+                    ),
+                )
+                row = cur.fetchone()
+
+                if row is None:
+                    cur.execute(
+                        select_sql,
+                        (idempotency_key,),
+                    )
+                    row = cur.fetchone()
+
+                    if row is None:
+                        raise RuntimeError(
+                            "幂等键发生冲突，但未查询到原任务"
+                        )
+
+                    # TODO 2：
+                    # 比较 row["request_fingerprint"]
+                    # 与本次 fingerprint。
+                    # 不一致时抛出 IdempotencyConflictError。
+                    # 一致时继续执行，不修改原任务。
+                    if row["request_fingerprint"] != fingerprint:
+                        raise IdempotencyConflictError(
+                            "幂等键已存在，但请求内容不一致"
+                        )
+
+        # 必须退出连接上下文、提交成功后再返回。
+        return row
