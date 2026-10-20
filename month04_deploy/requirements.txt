@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 prometheus-client>=0.20,<1
+psycopg[binary]>=3.2,<4

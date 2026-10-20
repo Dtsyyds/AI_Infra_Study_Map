@@ -1,5 +1,11 @@
 import asyncio
 import math
+
+import os
+
+from .durable.routes import create_task_router
+from .durable.task_store import TaskStore
+
 from contextlib import aclosing
 from collections.abc import AsyncIterator, AsyncGenerator
 from uuid import uuid4
@@ -73,6 +79,7 @@ def create_app(
     max_active: int = 16,
     send_timeout_seconds: float = 5.0,
     response_timeout_seconds: float = 30.0,
+    task_store: TaskStore | None = None,
 ) -> FastAPI:
     if (
         not math.isfinite(send_timeout_seconds)
@@ -293,6 +300,13 @@ def create_app(
             agent_stream=limited_agent_stream,
             send_timeout_seconds=send_timeout_seconds,
         )
+
+    if task_store is None:
+        dsn = os.environ.get("AGENT_DATABASE_URL")
+        if dsn:
+            task_store = TaskStore(dsn)
+
+    app.include_router(create_task_router(task_store))
 
     return app
 
