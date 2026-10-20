@@ -19,11 +19,13 @@ V0 版本 Agent
 """
 
 import re
+import uuid
 from trace import AgentTrace
 
+from checkpoint import CheckpointStore
 from execution_context import ExecutionContext, TaskCancelledError, TaskTimeoutError
 from executor import execute_action
-from llm import call_llm, LLMExecutionTimeoutError
+from llm import LLMExecutionTimeoutError, call_llm
 from memory import Memory
 from prompts import build_prompt
 from tool_runtime import ToolRuntime
@@ -36,9 +38,10 @@ class RuleBaseAgent:
     TODO: 后续可以考虑用 LLM 来生成规则
     """
 
-    def __init__(self, max_steps: int = 3):
+    def __init__(self, max_steps: int = 3, checkpoint_store: CheckpointStore | None = None):
         self.memory = Memory(max_steps)
         self.max_steps = max_steps
+        self.checkpoint_store = checkpoint_store
 
     def generate_action(self, user_input: str) -> tuple[str, str]:
         """
@@ -169,6 +172,7 @@ class LLMAgent:
         tool_runtime: ToolRuntime | None = None,
         step_timeout_seconds: float | None = None,
         llm_timeout_seconds: float | None = 30,
+        checkpoint_store: CheckpointStore | None = None,
     ):
         if llm_timeout_seconds is not None and llm_timeout_seconds < 0:
             raise ValueError("llm_timeout_seconds 不能为负数")
@@ -181,11 +185,16 @@ class LLMAgent:
         self.step_timeout_seconds = step_timeout_seconds
         self.llm_timeout_seconds = llm_timeout_seconds
 
+        self.checkpoint_store = checkpoint_store or CheckpointStore()
+
     def run(
         self,
         user_input: str,
         *,
         context: ExecutionContext | None = None,
+        thread_id: str | None = None,
+        resume: bool = False,
+        simulate_crash_after_step: int | None = None,
     ) -> str:
         """
         执行最大次数下的 Agent 流程
@@ -194,21 +203,63 @@ class LLMAgent:
         if context is None:
             context = ExecutionContext()
 
+        if thread_id is None:
+            thread_id = uuid.uuid4().hex[:8]
+        run_id = str(uuid.uuid4().hex[:8])
+
         # Agent trace 记录
         trace = AgentTrace()
 
         # 保存本次执行轨迹对象
         self.last_trace = trace
-        # 同步记录到 track 中
-        trace.set_user_input(user_input)
+        
         # 当前任务专用 scratchpad
         task_memory = Memory(max_messages=20)
         action_history = []
         last_observation = ""
+        start_step = 0
+
+        if resume:
+            checkpoint = self.checkpoint_store.load_latest(
+                thread_id
+            )
+
+            if checkpoint is None:
+                raise ValueError(
+                    f"thread {thread_id} 没有 checkpoint"
+                )
+
+            state = checkpoint["state"]
+
+            start_step = state["next_step"]
+
+            action_history = state.get(
+                "action_history",
+                [],
+            )
+
+            last_observation = state.get(
+                "last_observation",
+                "",
+            )
+
+            user_input = state["user_input"]
+
+            for message in state.get(
+                "task_memory_messages",
+                [],
+            ):
+                task_memory.add_message(
+                    message["role"],
+                    message["content"],
+                )
+
+        # 同步记录到 track 中
+        trace.set_user_input(user_input)
         # 1. 记录用户输入
         self.memory.add_user_message(user_input)
 
-        for step in range(self.max_steps):
+        for step in range(start_step, self.max_steps):
             print(f"======== step: {step} ======")
             try:
                 context.check_active()
@@ -318,6 +369,35 @@ class LLMAgent:
                 last_observation = observation
                 task_memory.add_observation(observation)
                 self.memory.add_observation(observation)
+
+                checkpoint = {
+                    "version": 1,
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "checkpoint_id": f"cp-{step + 1:06d}",
+                    "status": "running",
+                    "next_node": "agent",
+                    "state": {
+                        "user_input": user_input,
+                        "next_step": step + 1,
+                        "action_history": action_history,
+                        "last_observation": last_observation,
+                        "task_memory_messages": task_memory.get_message(),
+                    },
+                }
+
+                checkpoint_path = self.checkpoint_store.save(
+                    checkpoint
+                )
+
+                print(
+                    f"[Checkpoint Saved] {checkpoint_path}"
+                )
+
+                if simulate_crash_after_step == step:
+                    raise RuntimeError(
+                        f"SIMULATED_CRASH after step {step}"
+                    )
 
                 continue
 
