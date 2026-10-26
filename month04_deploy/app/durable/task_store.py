@@ -270,3 +270,142 @@ class TaskStore:
 
         # 必须退出连接上下文、提交成功后再返回。
         return row
+
+    def try_start_task_with_attempt(
+        self,
+        task_id: UUID,
+    ) -> dict[str, Any] | None:
+        """原子领取 queued 任务，并创建第 1 次执行尝试。"""
+
+        update_sql = """
+            UPDATE tasks
+            SET status = 'running',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE task_id = %s
+              AND status = 'queued'
+            RETURNING *
+        """
+
+        insert_sql = """
+            INSERT INTO task_attempts (
+                attempt_id,
+                task_id,
+                attempt_no
+            )
+            VALUES (%s, %s, %s)
+            RETURNING *
+        """
+
+        claimed = None
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 1：
+                # 执行 update_sql，参数只有 task_id。
+                # fetchone() 的结果赋给 task。
+                # raise NotImplementedError("完成 TODO 1")
+                cur.execute(update_sql, (task_id,))
+                task = cur.fetchone()
+
+                if task is not None:
+                    # TODO 2：
+                    # 使用同一个 cur 执行 insert_sql。
+                    # 参数依次为 uuid4()、task_id、1。
+                    # fetchone() 的结果赋给 attempt。
+                    # raise NotImplementedError("完成 TODO 2")
+
+                    cur.execute(insert_sql, (uuid4(), task_id, 1))
+                    attempt = cur.fetchone()
+
+                    if attempt is None:
+                        raise RuntimeError("创建执行尝试后没有返回记录")
+
+                    claimed = {
+                        "task": task,
+                        "attempt": attempt,
+                    }
+
+        # 任务状态和 Attempt 均提交成功后，才返回。
+        return claimed
+
+    def get_task_attempts(
+        self,
+        task_id: UUID,
+    ) -> list[dict[str, Any]]:
+        """按尝试序号查询一个任务的执行历史。"""
+
+        sql = """
+            SELECT *
+            FROM task_attempts
+            WHERE task_id = %s
+            ORDER BY attempt_no
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 3：
+                # 执行 sql，参数只有 task_id。
+                # fetchall() 的结果赋给 rows。
+                # raise NotImplementedError("完成 TODO 3")
+                cur.execute(sql, (task_id,))
+                rows = cur.fetchall()
+
+        return rows
+
+    def try_start_task_with_attempt(
+        self,
+        task_id: UUID,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """首次领取任务，并在同一事务中创建第 1 次 Attempt。"""
+        attempt_id = uuid4()
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 1：
+                # 使用当前 cur 执行条件 UPDATE：
+                # 仅将指定 task_id 的 queued 任务改为 running，
+                # 同时更新 updated_at，使用 RETURNING *。
+                # fetchone() 的结果赋给 task_row。
+                # raise NotImplementedError("完成 TODO 1")
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'running',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = %s
+                      AND status = 'queued'
+                    RETURNING *
+                    """,
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+
+                # TODO 2：
+                # 如果 task_row 为 None，直接返回 None。
+                # 此时不能继续插入 Attempt。
+                if task_row is None:
+                    return None
+
+                # raise NotImplementedError("完成 TODO 2")
+
+                # TODO 3：
+                # 使用同一个 cur 插入 task_attempts：
+                # attempt_id、task_id、attempt_no=1、status='running'。
+                # 使用 RETURNING *，结果赋给 attempt_row。
+                # raise NotImplementedError("完成 TODO 3")
+
+                cur.execute(
+                    """
+                    INSERT INTO task_attempts (attempt_id, task_id, attempt_no, status)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (attempt_id, task_id, 1, 'running'),
+                )
+                attempt_row = cur.fetchone()
+
+                if attempt_row is None:
+                    raise RuntimeError("插入 Attempt 后没有返回记录")
+
+        # 成功退出连接上下文、完成提交后，才能返回领取结果。
+        return task_row, attempt_row
