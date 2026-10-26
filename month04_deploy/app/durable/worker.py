@@ -83,11 +83,21 @@ def run_task_once(
 
         if task is None or task["status"] != "running":
             return None
-    else:
-        task = store.try_start_task(task_id)
 
-        if task is None:
+        attempt = store.get_running_attempt(task_id)
+        if attempt is None:
+            raise RuntimeError(
+                "无法恢复：running Task 缺少对应的 running Attempt"
+            )
+    else:
+        # task = store.try_start_task(task_id)
+
+        # if task is None:
+        #     return None
+        claimed = store.try_start_task_with_attempt(task_id)
+        if claimed is None:
             return None
+        task, attempt = claimed
 
     if task["task_type"] != "demo.echo":
         raise ValueError(
@@ -145,7 +155,9 @@ def run_task_once(
             )
             os._exit(86)
 
-    finished = store.try_succeed_task(task_id, state)
+    # finished = store.try_succeed_task(task_id, state)
+    finished = store.try_succeed_task_with_attempt(
+        task_id, attempt["attempt_id"], state)
 
     if finished is None:
         raise RuntimeError(

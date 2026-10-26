@@ -409,3 +409,96 @@ class TaskStore:
 
         # 成功退出连接上下文、完成提交后，才能返回领取结果。
         return task_row, attempt_row
+
+    def try_succeed_task_with_attempt(
+        self,
+        task_id: UUID,
+        attempt_id: UUID,
+        result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """在同一事务中完成任务及其对应的 Attempt。"""
+
+        task_sql = """
+            UPDATE tasks AS t
+            SET status = 'succeeded',
+                result = %s,
+                error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE t.task_id = %s
+            AND t.status = 'running'
+            AND EXISTS (
+                SELECT 1
+                FROM task_attempts AS a
+                WHERE a.task_id = t.task_id
+                    AND a.attempt_id = %s
+                    AND a.status = 'running'
+            )
+            RETURNING t.*
+        """
+
+        attempt_sql = """
+            UPDATE task_attempts
+            SET status = 'succeeded',
+                error = NULL,
+                finished_at = CURRENT_TIMESTAMP
+            WHERE attempt_id = %s
+            AND task_id = %s
+            AND status = 'running'
+            RETURNING *
+        """
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 1：
+                # 执行 task_sql。
+                # 参数依次为 Jsonb(result)、task_id、attempt_id。
+                # fetchone() 的结果赋给 task_row。
+                # 如果 task_row 为 None，使用你刚才的 A 分支。
+                # raise NotImplementedError("完成 TODO 1")
+                cur.execute(
+                    task_sql,
+                    (Jsonb(result), task_id, attempt_id),
+                )
+                task_row = cur.fetchone()
+                if task_row is None:
+                    return None
+
+                # TODO 2：
+                # 使用同一个 cur 执行 attempt_sql。
+                # 参数依次为 attempt_id、task_id。
+                # fetchone() 的结果赋给 attempt_row。
+                # 如果 attempt_row 为 None，使用你刚才的 B 分支。
+                # raise NotImplementedError("完成 TODO 2")
+                cur.execute(
+                    attempt_sql,
+                    (attempt_id, task_id),
+                )
+                attempt_row = cur.fetchone()
+                if attempt_row is None:
+                    raise RuntimeError(
+                        "尝试更新 Attempt 后没有返回记录"
+                    )
+
+        # 两次更新提交成功后，才返回任务结果。
+        return task_row
+
+    def get_running_attempt(
+        self,
+        task_id: UUID,
+    ) -> dict[str, Any] | None:
+        """查询任务当前尚未完成的 Attempt。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO：
+                # 查询 task_attempts。
+                # 条件：task_id 匹配，并且 status = 'running'。
+                # 使用参数绑定，返回 fetchone() 的结果。
+                # raise NotImplementedError("完成 running Attempt 查询")
+                cur.execute(
+                    """
+                    SELECT * FROM task_attempts
+                    WHERE task_id = %s AND status = 'running'
+                    """,
+                    (task_id,),
+                )
+                return cur.fetchone()

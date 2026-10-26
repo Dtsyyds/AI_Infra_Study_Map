@@ -11,6 +11,7 @@ from month04_deploy.app.durable.worker import run_task_once
 def test_resume_skips_saved_steps(completed_count):
     store = create_autospec(TaskStore, instance=True)
     task_id = uuid4()
+    attempt_id = uuid4()
 
     saved_steps = [
         {
@@ -39,10 +40,16 @@ def test_resume_skips_saved_steps(completed_count):
     final_result = {"answer": "echo:crash lesson"}
 
     store.get_task.return_value = task
+    store.get_running_attempt.return_value = {
+        "attempt_id": attempt_id,
+        "task_id": task_id,
+        "attempt_no": 1,
+        "status": "running",
+    }
     store.get_completed_steps.return_value = (
         saved_steps[:completed_count]
     )
-    store.try_succeed_task.return_value = {
+    store.try_succeed_task_with_attempt.return_value = {
         **task,
         "status": "succeeded",
         "result": final_result,
@@ -58,8 +65,9 @@ def test_resume_skips_saved_steps(completed_count):
     assert finished["result"] == final_result
 
     store.get_task.assert_called_once_with(task_id)
+    store.get_running_attempt.assert_called_once_with(task_id)
     store.get_completed_steps.assert_called_once_with(task_id)
-    store.try_start_task.assert_not_called()
+    store.try_start_task_with_attempt.assert_not_called()
 
     expected_saves = (
         [
@@ -78,7 +86,8 @@ def test_resume_skips_saved_steps(completed_count):
         store.save_completed_step.call_args_list
         == expected_saves
     )
-    store.try_succeed_task.assert_called_once_with(
+    store.try_succeed_task_with_attempt.assert_called_once_with(
         task_id,
+        attempt_id,
         final_result,
     )

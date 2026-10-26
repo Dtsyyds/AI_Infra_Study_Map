@@ -11,6 +11,7 @@ from month04_deploy.app.durable.worker import run_task_once
 @pytest.fixture
 def worker_case():
     task_id = uuid4()
+    attempt_id = uuid4()
     store = create_autospec(TaskStore, instance=True)
 
     task = {
@@ -20,26 +21,32 @@ def worker_case():
         "status": "running",
     }
 
-    store.try_start_task.return_value = task
-    store.try_succeed_task.return_value = {
+    attempt = {
+        "attempt_id": attempt_id,
+        "task_id": task_id,
+        "attempt_no": 1,
+        "status": "running",
+    }
+    store.try_start_task_with_attempt.return_value = (task, attempt)
+    store.try_succeed_task_with_attempt.return_value = {
         **task,
         "status": "succeeded",
         "result": {"answer": "echo:hello"},
         "error": None,
     }
 
-    return store, task_id
+    return store, task_id, attempt_id
 
 
 def test_worker_completes_three_steps(worker_case):
-    store, task_id = worker_case
+    store, task_id, attempt_id = worker_case
 
     finished = run_task_once(store, task_id)
 
     assert finished["status"] == "succeeded"
     assert finished["result"] == {"answer": "echo:hello"}
 
-    store.try_start_task.assert_called_once_with(task_id)
+    store.try_start_task_with_attempt.assert_called_once_with(task_id)
 
     store.save_completed_step.assert_has_calls(
         [
@@ -65,33 +72,35 @@ def test_worker_completes_three_steps(worker_case):
     )
     assert store.save_completed_step.call_count == 3
 
-    store.try_succeed_task.assert_called_once_with(
+    store.try_succeed_task_with_attempt.assert_called_once_with(
         task_id,
+        attempt_id,
         {"answer": "echo:hello"},
     )
 
     # 验证认领、保存步骤、最终完成的调用顺序。
     assert [item[0] for item in store.mock_calls] == [
-        "try_start_task",
+        "try_start_task_with_attempt",
         "save_completed_step",
         "save_completed_step",
         "save_completed_step",
-        "try_succeed_task",
+        "try_succeed_task_with_attempt",
     ]
 
 
 def test_worker_does_not_proceed_without_claim(worker_case):
-    store, task_id = worker_case
-    store.try_start_task.return_value = None
+    store, task_id, _ = worker_case
+    store.try_start_task_with_attempt.return_value = None
 
     assert run_task_once(store, task_id) is None
 
+    store.try_start_task_with_attempt.assert_called_once_with(task_id)
     store.save_completed_step.assert_not_called()
-    store.try_succeed_task.assert_not_called()
+    store.try_succeed_task_with_attempt.assert_not_called()
 
 
 def test_step_save_error_prevents_task_success(worker_case):
-    store, task_id = worker_case
+    store, task_id, _ = worker_case
     store.save_completed_step.side_effect = (
         psycopg.OperationalError("step commit failed")
     )
@@ -103,12 +112,18 @@ def test_step_save_error_prevents_task_success(worker_case):
         run_task_once(store, task_id)
 
     assert store.save_completed_step.call_count == 1
-    store.try_succeed_task.assert_not_called()
+    store.try_succeed_task_with_attempt.assert_not_called()
 
 
 def test_rejected_completion_is_not_success(worker_case):
-    store, task_id = worker_case
-    store.try_succeed_task.return_value = None
+    store, task_id, attempt_id = worker_case
+    store.try_succeed_task_with_attempt.return_value = None
 
     with pytest.raises(RuntimeError, match="completion rejected"):
         run_task_once(store, task_id)
+
+    store.try_succeed_task_with_attempt.assert_called_once_with(
+        task_id,
+        attempt_id,
+        {"answer": "echo:hello"},
+    )
