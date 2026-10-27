@@ -502,3 +502,79 @@ class TaskStore:
                     (task_id,),
                 )
                 return cur.fetchone()
+
+    def try_fail_task_with_attempt(
+        self,
+        task_id: UUID,
+        attempt_id: UUID,
+        error: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """在同一事务中记录任务及其对应 Attempt 的失败。"""
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # TODO 1：条件更新 Task。
+                #
+                # 更新上表中的 Task 字段。
+                # 条件：
+                #   1. task_id 匹配；
+                #   2. Task 当前为 running；
+                #   3. EXISTS 指定 attempt_id 的 running Attempt，
+                #      且它属于这个 Task。
+                #
+                # 使用 RETURNING，fetchone() 赋给 task_row。
+                # 如果 task_row 为 None，返回 None。
+                # raise NotImplementedError("完成 Task 失败更新")
+                cur.execute(
+                    """
+                    UPDATE tasks AS t
+                    SET status = 'failed',
+                        updated_at = CURRENT_TIMESTAMP,
+                        result = NULL,
+                        error = %s
+                    WHERE task_id = %s
+                        AND status = 'running'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM task_attempts AS a
+                            WHERE a.task_id = t.task_id
+                            AND a.attempt_id = %s
+                            AND a.status = 'running'
+                        )
+                    RETURNING *
+                    """,
+                    (Jsonb(error), task_id, attempt_id),
+                )
+                task_row = cur.fetchone()
+                if task_row is None:
+                    return None
+                # TODO 2：使用同一个 cur 条件更新 Attempt。
+                #
+                # 更新上表中的 Attempt 字段。
+                # 条件：attempt_id、task_id 均匹配，且当前为 running。
+                #
+                # 使用 RETURNING，fetchone() 赋给 attempt_row。
+                # 如果 attempt_row 为 None，抛出 RuntimeError，
+                # 让前面的 Task 更新一起回滚。
+                # raise NotImplementedError("完成 Attempt 失败更新")
+                cur.execute(
+                    """
+                    UPDATE task_attempts
+                    SET status = 'failed',
+                        finished_at = CURRENT_TIMESTAMP,
+                        error = %s
+                    WHERE attempt_id = %s
+                        AND task_id = %s
+                        AND status = 'running'
+                    RETURNING *
+                    """,
+                    (Jsonb(error), attempt_id, task_id),
+                )
+                attempt_row = cur.fetchone()
+                if attempt_row is None:
+                    raise RuntimeError(
+                        "尝试更新 Attempt 后没有返回记录"
+                    )
+
+        # 提交成功后，返回已标记为 failed 的 Task。
+        return task_row

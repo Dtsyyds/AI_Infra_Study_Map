@@ -134,7 +134,34 @@ def run_task_once(
         remaining_steps,
         start=next_step,
     ):
-        state = operation(state)
+        # state = operation(state)
+        try:
+            state = operation(state)
+        except ValueError as exc:
+            error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "step_index": step_index,
+                "step_name": step_name,
+            }
+            # TODO 1：
+            # 调用 store.try_fail_task_with_attempt()。
+            # 参数：task_id、attempt["attempt_id"]、error。
+            # 返回值赋给 failed。
+            failed = store.try_fail_task_with_attempt(
+                task_id, attempt["attempt_id"], error)
+
+            # TODO 2：
+            # 如果 failed 为 None，说明失败记录没有被接受。
+            # 抛出 RuntimeError("failure recording rejected") from exc。
+            if failed is None:
+                raise RuntimeError(
+                    "failure recording rejected") from exc
+            # 完成以上两项后，删除下面这个占位异常。
+
+            # 失败记录提交成功后，继续向调用方抛出原始 ValueError。
+            raise
+
 
         store.save_completed_step(
             task_id,
