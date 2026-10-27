@@ -22,3 +22,9 @@ class MyStack:
 
     def empty(self) -> bool:
         return not self.deque1
+
+class MyStack_good:
+    def __init__(self):
+        self.deque = deque()
+
+    def push(self, x: int) -> None:
