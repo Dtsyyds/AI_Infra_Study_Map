@@ -1,5 +1,6 @@
 from typing import Any
 from uuid import UUID, uuid4
+from datetime import datetime
 
 import psycopg
 from psycopg.rows import dict_row
@@ -10,6 +11,7 @@ from .idempotency import (
     build_request_fingerprint,
 )
 
+from .retry_policy import RetryDecision, decide_retry
 
 class TaskStore:
     def __init__(self, dsn: str):
@@ -26,16 +28,26 @@ class TaskStore:
         self,
         task_type: str,
         payload: dict[str, Any],
+        *,
+        retry_deadline_at: datetime | None = None,
     ) -> dict[str, Any]:
+        if retry_deadline_at is not None:
+            # 检查时区
+            if (
+                retry_deadline_at.tzinfo is None
+                or retry_deadline_at.utcoffset() is None
+            ):
+                raise ValueError("retry_deadline_at 必须带时区")
         task_id = uuid4()
 
         sql = """
             INSERT INTO tasks (
                 task_id,
                 task_type,
-                payload
+                payload,
+                retry_deadline_at
             )
-            VALUES (%s, %s, %s)
+            VALUES (%s, %s, %s, %s)
             RETURNING *
         """
 
@@ -47,7 +59,7 @@ class TaskStore:
             # 三个参数依次为：
             # task_id、task_type、经过 Jsonb 包装的 payload。
             with conn.cursor() as cur:
-                cur.execute(sql, (task_id, task_type, Jsonb(payload)))
+                cur.execute(sql, (task_id, task_type, Jsonb(payload), retry_deadline_at))
                 row = cur.fetchone()
 
             if row is None:
@@ -270,64 +282,6 @@ class TaskStore:
 
         # 必须退出连接上下文、提交成功后再返回。
         return row
-
-    def try_start_task_with_attempt(
-        self,
-        task_id: UUID,
-    ) -> dict[str, Any] | None:
-        """原子领取 queued 任务，并创建第 1 次执行尝试。"""
-
-        update_sql = """
-            UPDATE tasks
-            SET status = 'running',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE task_id = %s
-              AND status = 'queued'
-            RETURNING *
-        """
-
-        insert_sql = """
-            INSERT INTO task_attempts (
-                attempt_id,
-                task_id,
-                attempt_no
-            )
-            VALUES (%s, %s, %s)
-            RETURNING *
-        """
-
-        claimed = None
-
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                # TODO 1：
-                # 执行 update_sql，参数只有 task_id。
-                # fetchone() 的结果赋给 task。
-                # raise NotImplementedError("完成 TODO 1")
-                cur.execute(update_sql, (task_id,))
-                task = cur.fetchone()
-
-                if task is not None:
-                    # TODO 2：
-                    # 使用同一个 cur 执行 insert_sql。
-                    # 参数依次为 uuid4()、task_id、1。
-                    # fetchone() 的结果赋给 attempt。
-                    # raise NotImplementedError("完成 TODO 2")
-
-                    cur.execute(insert_sql, (uuid4(), task_id, 1))
-                    attempt = cur.fetchone()
-
-                    if attempt is None:
-                        raise RuntimeError("创建执行尝试后没有返回记录")
-
-                    claimed = {
-                        "task": task,
-                        "attempt": attempt,
-                    }
-
-        # 任务状态和 Attempt 均提交成功后，才返回。
-        return claimed
-
     def get_task_attempts(
         self,
         task_id: UUID,
@@ -578,3 +532,132 @@ class TaskStore:
 
         # 提交成功后，返回已标记为 failed 的 Task。
         return task_row
+
+    def try_retry_task_with_attempt(
+        self,
+        task_id: UUID,
+        expected_attempt_id: UUID,
+        *,
+        retryable_error: bool,
+        outcome_unknown: bool,
+        replay_safe: bool,
+        max_attempts: int,
+    ):
+        """重试领取的练习骨架，尚未完成。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE task_id = %s
+                    FOR UPDATE
+                    """,
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+
+                if task_row is None or task_row["status"] != "failed":
+                    return None
+
+                # TODO：补在这里
+                # 使用同一个 cur 查询这个 Task 的最新 Attempt。
+                # 按 attempt_no 降序，只取一条。
+                # fetchone() 的结果赋给 latest_attempt。
+                cur.execute(
+                    """
+                    SELECT * FROM task_attempts
+                    WHERE task_id = %s
+                    ORDER BY attempt_no DESC
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                latest_attempt = cur.fetchone()
+
+                if latest_attempt is None:
+                    raise RuntimeError("无最新 Attempt 记录")
+
+                if latest_attempt["status"] != "failed":
+                    raise RuntimeError("最新 Attempt 不是 failed")
+
+                if latest_attempt["attempt_id"] != expected_attempt_id:
+                    return None
+
+                # 此处已经持有 Task 行锁，并完成了最新 Attempt 校验。
+                # 此处已经持有 Task 行锁，并完成最新 Attempt 校验。
+                retry_deadline_at = task_row["retry_deadline_at"]
+
+                cur.execute("SELECT clock_timestamp() AS checked_at")
+                clock_row = cur.fetchone()
+                checked_at = clock_row["checked_at"]
+
+                if retry_deadline_at is None:
+                    time_budget_remaining = False
+                else:
+                    time_budget_remaining = checked_at < retry_deadline_at
+
+                decision = decide_retry(
+                    retryable_error=retryable_error,
+                    outcome_unknown=outcome_unknown,
+                    replay_safe=replay_safe,
+                    attempts_used=latest_attempt["attempt_no"],
+                    max_attempts=max_attempts,
+                    time_budget_remaining=time_budget_remaining,
+                )
+
+                if decision is not RetryDecision.RETRY:
+                    return decision
+
+                task_sql = """
+                    UPDATE tasks AS t
+                    SET status = 'running',
+                        result = NULL,
+                        error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE t.task_id = %s
+                    AND t.status = 'failed'
+                    RETURNING t.*
+                """
+                new_attempt_no = latest_attempt["attempt_no"] + 1
+                attempt_sql = """
+                    INSERT INTO task_attempts (
+                        attempt_id,
+                        task_id,
+                        attempt_no,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                """
+                # TODO 1：更新 Task。
+                # 使用当前 cur 执行 task_sql，参数为 (task_id,)。
+                # fetchone() 赋给 task_row，覆盖前面查询到的旧记录。
+                # 如果 task_row 为 None：
+                #     raise RuntimeError("重试更新 Task 后没有返回记录")
+                # raise NotImplementedError("完成 Task 重试更新")
+                cur.execute(
+                    task_sql,
+                    (task_id,)
+                )
+                task_row = cur.fetchone()
+                if task_row is None:
+                    raise RuntimeError("重试更新 Task 后没有返回记录")
+
+                # TODO 2：创建新的 Attempt。
+                # 使用同一个 cur 执行 attempt_sql。
+                # 参数依次为：
+                #   uuid4()、task_id、new_attempt_no、"running"
+                # fetchone() 赋给 attempt_row。
+                # 如果 attempt_row 为 None：
+                #     raise RuntimeError("创建重试 Attempt 后没有返回记录")
+                # raise NotImplementedError("完成新 Attempt 创建")
+                cur.execute(
+                    attempt_sql,
+                    (uuid4(), task_id, new_attempt_no, "running",)
+                )
+                attempt_row = cur.fetchone()
+                if attempt_row is None:
+                    raise RuntimeError("创建重试 Attempt 后没有返回记录")
+
+        # 放在两个 with 外面：提交成功后返回领取结果。
+        return task_row, attempt_row
