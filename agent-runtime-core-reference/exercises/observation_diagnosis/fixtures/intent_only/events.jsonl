@@ -1,0 +1,1 @@
+{"event": "SUBMISSION_INTENT", "submission_id": "synthetic-submission", "request": {"session_id": "synthetic-submission", "document_id": "DOC-002"}, "slot": {"index": 0}, "model": false}

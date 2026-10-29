@@ -1,0 +1,68 @@
+{
+  "source": "original synthetic teaching cases",
+  "license": "CC0-1.0",
+  "blind_evaluation": false,
+  "split_frozen_before_model_requests": true,
+  "cases": [
+    {
+      "case_id": "case-01",
+      "split": "dev",
+      "manifest_hash": "938b62243c2cb98b41513252f946d8c013821db9ffcff05df1c9b2f3eb652b91"
+    },
+    {
+      "case_id": "case-02",
+      "split": "dev",
+      "manifest_hash": "cd59673096f358ec4ae83dd525d976d4aa0140217fce10ed9d55a8d0775e3258"
+    },
+    {
+      "case_id": "case-03",
+      "split": "dev",
+      "manifest_hash": "460aac1f2e496c423ac034ab76fc752429fcd41bf81cfcaac3b28481ae483844"
+    },
+    {
+      "case_id": "case-04",
+      "split": "dev",
+      "manifest_hash": "a975b47699aa4442ee2ab75fb01810cce4884f05c35ce2175891a4cf5acc11b7"
+    },
+    {
+      "case_id": "case-05",
+      "split": "holdout",
+      "manifest_hash": "2ec7ad110295b5b18ef59465908cf4f8e2ccdf26712b82839073858bf2d0c2fd"
+    },
+    {
+      "case_id": "case-06",
+      "split": "holdout",
+      "manifest_hash": "a1707aa5c0e50c0e35d43815196bcd55c4711eb6c25b499668197701cea0a005"
+    },
+    {
+      "case_id": "case-07",
+      "split": "holdout",
+      "manifest_hash": "bcf3bc19ae19f60f3ceead8ae327a0e58665ade14cb47a4755acd9c2ed7819c2"
+    },
+    {
+      "case_id": "case-08",
+      "split": "holdout",
+      "manifest_hash": "d5a976004fa9fa7cc267bd636c846fcb7c4704007477ca68c595811c9ec26070"
+    },
+    {
+      "case_id": "case-09",
+      "split": "holdout",
+      "manifest_hash": "23487cdac7758c3bb4e2d4c6a66ca1374ba338ec426a7ff1255da53f42182960"
+    },
+    {
+      "case_id": "case-10",
+      "split": "holdout",
+      "manifest_hash": "2c494be8042dadd6f567914a86e12cd4b6f73bbfc31038705df8a263bfc4cff8"
+    },
+    {
+      "case_id": "case-11",
+      "split": "holdout",
+      "manifest_hash": "c91e00b77a18735c491026fe542786a1e74c9b56a69956b94a3954f3e832dd06"
+    },
+    {
+      "case_id": "case-12",
+      "split": "holdout",
+      "manifest_hash": "8735645838b68c80288d035d376ef0c5dbc19f78358ffe58cf61078d3fa7ec60"
+    }
+  ]
+}

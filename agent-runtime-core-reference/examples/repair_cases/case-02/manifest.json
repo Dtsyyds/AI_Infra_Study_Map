@@ -1,0 +1,51 @@
+{
+  "schema_version": "1",
+  "case_id": "case-02",
+  "split": "dev",
+  "goal": "parse true/false and 1/0 textual flags",
+  "base_revision": null,
+  "snapshot_hash": "62a16ae604f549cd8ecae9400cc7a7c2f67962e5536b712b4c8604d03c38b46f",
+  "repo_content_hash": "62a16ae604f549cd8ecae9400cc7a7c2f67962e5536b712b4c8604d03c38b46f",
+  "image_digest": "python:3.11.17-slim-bookworm@sha256:f06d01d4ba3f8ad5af45a3ec87df19c1d317d8e8961edc0fabda61811af6f7cf",
+  "test_suite_hash": "9d9e1e8a2c40ace136cca836cfc31e3b54796e7908440aec7b900462ad04d451",
+  "runner_hash": "39ae77302517e49cef629f602cb36ade2a0b816f6b2e6562b006e803545f1dbe",
+  "allowed_paths": [
+    "src/solution.py"
+  ],
+  "forbidden_paths": [
+    "tests",
+    "conftest.py",
+    "pytest.ini",
+    "pyproject.toml",
+    "requirements.lock",
+    "runtime",
+    "core",
+    "deploy"
+  ],
+  "expected_test_ids": [
+    "test_case.Case.test_bug",
+    "test_case.Case.test_regression"
+  ],
+  "baseline_fail": [
+    "test_case.Case.test_bug"
+  ],
+  "baseline_pass": [
+    "test_case.Case.test_regression"
+  ],
+  "test_argv": [
+    "python",
+    "-I",
+    "-B",
+    "-c",
+    "\"\"\"Trusted stdlib test runner. Executed ONLY inside the pinned Docker image.\"\"\"\nimport contextlib\nimport hashlib\nimport io\nimport json\nimport pathlib\nimport signal\nimport sys\nimport unittest\n\n\ndef digest(files):\n    return hashlib.sha256(json.dumps(files, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()\n\n\ndef main():\n    data = json.load(sys.stdin)\n    root = pathlib.Path('/tmp/repair')\n    root.mkdir()\n    for name, content in data['files'].items():\n        path = pathlib.PurePosixPath(name)\n        if path.is_absolute() or '..' in path.parts:\n            raise ValueError('invalid payload path')\n        destination = root / name\n        destination.parent.mkdir(parents=True, exist_ok=True)\n        destination.write_text(content)\n    print('ARC_REPAIR_STARTED', flush=True)\n    sys.path.insert(0, str(root/'src'))\n    collected, records = [], []\n\n    class Result(unittest.TestResult):\n        def startTest(self, test):\n            super().startTest(test)\n            if data.get('test_pause'):\n                # Trusted process-only fault switch, never a model/API tool argument.\n                print('ARC_REPAIR_TEST_ENTERED', file=sys.__stdout__, flush=True)\n                while True:\n                    signal.pause()\n\n        def addSuccess(self, test):\n            super().addSuccess(test)\n            records.append({'test_id': test.id(), 'outcome': 'passed'})\n\n        def addFailure(self, test, error):\n            super().addFailure(test, error)\n            records.append({'test_id': test.id(), 'outcome': 'failed'})\n\n        def addError(self, test, error):\n            super().addError(test, error)\n            # An unexpected exception inside a collected test is a candidate test failure.\n            # Collection/import failures instead fail the expected-ID completeness gate.\n            records.append({'test_id': test.id(), 'outcome': 'failed'})\n\n        def addSkip(self, test, reason):\n            super().addSkip(test, reason)\n            records.append({'test_id': test.id(), 'outcome': 'skipped'})\n\n        def addExpectedFailure(self, test, error):\n            super().addExpectedFailure(test, error)\n            records.append({'test_id': test.id(), 'outcome': 'xfail'})\n\n        def addUnexpectedSuccess(self, test):\n            super().addUnexpectedSuccess(test)\n            records.append({'test_id': test.id(), 'outcome': 'xpass'})\n\n    def collect(suite):\n        for test in suite:\n            if isinstance(test, unittest.TestSuite):\n                collect(test)\n            else:\n                collected.append(test.id())\n\n    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):\n        suite = unittest.TestLoader().discover(str(root/'tests'))\n        collect(suite)\n        result = Result()\n        suite.run(result)\n    protected = {}\n    for name in data['files']:\n        if name not in data['allowed_paths']:\n            p = root/name\n            if p.is_symlink():\n                raise ValueError('protected symlink')\n            protected[name] = p.read_text()\n    report = {'schema_version': '1', 'identity': data['identity'], 'collected_ids': collected,\n              'tests': records, 'protected_hash': digest(protected), 'complete': True}\n    print('ARC_REPAIR_REPORT '+json.dumps(report, sort_keys=True), flush=True)\n    raise SystemExit(0 if result.wasSuccessful() else 1)\n\n\nif __name__ == '__main__':\n    main()\n"
+  ],
+  "limits": {
+    "candidates": 3,
+    "files": 3,
+    "changed_lines": 200,
+    "patch_bytes": 32768,
+    "wall_seconds": 10,
+    "output_bytes": 262144,
+    "max_steps": 9
+  }
+}

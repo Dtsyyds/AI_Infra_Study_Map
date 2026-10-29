@@ -1,0 +1,30 @@
+工程迁移说明
+
+source.zip 是当前工作目录快照，包含尚未提交的最新修改。
+先阅读 resume.md、TASK_STATUS.json 和 docs/workbench_plan.md。
+_migration/history.bundle 保存本地 Git 可达提交历史；未提交改动以源码快照为准。
+_migration/manifest.json 记录源文件 SHA-256、原始提交和工作区状态。
+
+evidence.zip 保存现有 reports/ 与历史 delivery/，解压到与 source.zip 相同的父目录即可合并。
+其中日志、PID 和服务记录只是历史证据；不要把旧 PID 当成新平台的运行状态。
+
+若需要恢复 Git 历史：先从 source.zip 单独取出 _migration/history.bundle，执行
+  git clone /path/to/history.bundle agent-runtime-core-reference
+再把 source.zip 中 agent-runtime-core-reference/ 的内容覆盖到克隆目录，保留 .git。
+这样历史提交与最新未提交修改都得到保留。远程地址需按新平台重新配置。
+
+环境需在新平台重建：Python 3.11、requirements.lock、PostgreSQL 17、Docker。
+  python3.11 -m venv .venv
+  .venv/bin/python -m pip install -r requirements.lock
+应用配置见 .env.example 和 config/settings.py；按新平台设置数据库地址。
+Makefile 的 db-start/db-stop 依赖本地 .postgres/bin；若使用托管数据库则无需执行这两项。
+新空数据库配置完成后执行：
+  .venv/bin/alembic upgrade head
+  make start
+  make worker
+Docker 沙箱依赖目标平台允许访问 Docker daemon；尚未在新平台验证。
+文档中的 /home/dts/... 是旧机器路径，迁移时应替换为实际路径。
+
+未包含：真实 .env/凭据、虚拟环境、Python/PostgreSQL 本机二进制、数据库 .pgdata、Docker 镜像、缓存。
+这些包不是数据库备份；历史报告不能代替任务数据库。若需保留任务/审计/Artifact 状态，还需单独执行 PostgreSQL 逻辑备份和恢复。
+未启动数据库、修改源码、创建提交、推送仓库或上传外部平台。本次仅校验归档完整性，未重跑应用测试。

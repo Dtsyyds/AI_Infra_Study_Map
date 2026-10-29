@@ -1,0 +1,23 @@
+GitHub迁移入口
+
+目标仓库：https://github.com/Dtsyyds/AI_Infra_Study_Map
+目标分支：project
+工程目录：agent-runtime-core-reference/
+
+在新机器执行：
+  git clone --branch project --single-branch https://github.com/Dtsyyds/AI_Infra_Study_Map.git
+  cd AI_Infra_Study_Map/agent-runtime-core-reference
+
+此目录包含迁移时的220个源码/文档文件及最新未提交变更。
+先读 resume.md、TASK_STATUS.json 和 docs/workbench_plan.md。
+原工程的独立Git历史保存在 _migration/history.bundle；本仓库的分支历史正常延续。
+_migration/MIGRATION.txt是打包时记录，上传状态以当前GitHub提交为准。
+
+如需历史验收报告，在仓库根目录解压：
+  python3 -m zipfile -e agent-runtime-core-reference/_migration/evidence.zip .
+报告恢复到工程的 reports/ 和 delivery/。这些是历史证据，不是当前服务状态。
+在 _migration/ 内执行 sha256sum -c SHA256SUMS.txt 可校验迁移包。
+
+数据库数据、真实.env、虚拟环境、Docker镜像未上传。按迁移说明重建环境；若需要原有任务状态，还需另行导出/恢复PostgreSQL数据库。
+工程原有 .github/workflows/check.yml 保留在工程子目录中，不会自动成为本仓库根目录的工作流。
+本次为迁移上传，未重跑应用测试。

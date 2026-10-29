@@ -1,0 +1,274 @@
+{
+  "contract": "job-delivery-v2",
+  "run_id": "20261026T070223Z-three-track-research",
+  "overall": "PARTIAL",
+  "p0": "PASS",
+  "external_acceptance": "NOT_PERFORMED",
+  "personal_mastery": "NOT_ASSESSED",
+  "services": "STOPPED",
+  "gates": {
+    "G0": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "PASS",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/p0/results.json",
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml"
+      ],
+      "remaining": []
+    },
+    "G1": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "PASS",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml",
+        "reports/20261026T021326Z-docker-free-validation/harness-acceptance/summary.json"
+      ],
+      "remaining": []
+    },
+    "G2": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "PASS",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml",
+        "reports/20261026T021326Z-docker-free-validation/sandbox-matrix/results.jsonl",
+        "reports/20261026T021326Z-docker-free-validation/repair-demo/result.json"
+      ],
+      "remaining": []
+    },
+    "G3": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "CONTRACT_VERIFIED_REAL_MODEL_NOT_AUTHORIZED",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml",
+        "reports/20261026T021326Z-docker-free-validation/benchmarks/not_run.json"
+      ],
+      "remaining": [
+        "Real model smoke and 72-task experiment excluded by current user instruction; no real backend compatibility or model repair claim"
+      ]
+    },
+    "G4": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "PASS",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml",
+        "reports/20261026T021326Z-docker-free-validation/repair-process/result.json",
+        "reports/20261026T021326Z-docker-free-validation/repair-recovery/results.jsonl",
+        "reports/20261026T021326Z-docker-free-validation/sandbox-matrix/results.jsonl"
+      ],
+      "remaining": []
+    },
+    "G5": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "PASS_LOCAL_SCOPE_REMOTE_CI_NOT_RUN",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/final-test-results-2.xml",
+        "reports/20261026T021326Z-docker-free-validation/backend-probe.json",
+        "reports/20261026T021326Z-docker-free-validation/migration-probe.json",
+        "reports/20261026T021326Z-docker-free-validation/sql-plans.json",
+        "reports/20261026T021326Z-docker-free-validation/cli-probe/result.json",
+        "reports/20261026T021326Z-docker-free-validation/resource-cleanup.json",
+        "reports/20261026T021326Z-docker-free-validation/benchmarks/load-attempt-2/load_summary.json"
+      ],
+      "remaining": [
+        "Remote CI NOT_RUN under no-push instruction; local equivalent and full local integration passed"
+      ],
+      "supplementary_evidence": [
+        "reports/20261026T032837Z-steady-load/final-test-results.xml",
+        "reports/20261026T032837Z-steady-load/load-database-audit.json",
+        "reports/20261026T032837Z-steady-load/observer-crash/result.json"
+      ]
+    },
+    "G6": {
+      "implementation_status": "IMPLEMENTED",
+      "validation_status": "RUNTIME_VALIDATION_PASS_MODEL_NOT_AUTHORIZED",
+      "run_id": "20261026T021326Z-docker-free-validation",
+      "evidence": [
+        "reports/20261026T021326Z-docker-free-validation/reliability/raw.jsonl",
+        "reports/20261026T021326Z-docker-free-validation/additional-faults/raw.jsonl",
+        "reports/20261026T021326Z-docker-free-validation/benchmarks/not_run.json",
+        "reports/20261026T021326Z-docker-free-validation/benchmarks/load-attempt-2/load_raw.jsonl",
+        "reports/20261026T021326Z-docker-free-validation/benchmarks/load-attempt-2/load_summary-recomputed.json",
+        "reports/20261026T021326Z-docker-free-validation/validation-audit.json"
+      ],
+      "remaining": [
+        "72 real-model tasks excluded by current user instruction; actual 0"
+      ],
+      "supplementary_evidence": [
+        "reports/20261026T032837Z-steady-load/final-test-results.xml",
+        "reports/20261026T032837Z-steady-load/load-database-audit.json",
+        "reports/20261026T032837Z-steady-load/observer-crash/result.json"
+      ]
+    },
+    "G7": {
+      "implementation_status": "SOURCE_AND_EVIDENCE_READY",
+      "validation_status": "EXTERNAL_ACCEPTANCE_NOT_PERFORMED",
+      "run_id": "20261026T070223Z-three-track-research",
+      "evidence": [
+        "reports/20261026T070223Z-three-track-research/FINAL_REPORT.md",
+        "reports/20261026T070223Z-three-track-research/commands.jsonl"
+      ],
+      "remaining": [
+        "Independent review pending",
+        "Personal mastery NOT_ASSESSED"
+      ]
+    }
+  },
+  "next_entry": "resume.md",
+  "previous_run_id": "20261026T032837Z-steady-load",
+  "final_test_results": "final-test-results-2.xml",
+  "supplementary_run_ids": [
+    "20261026T032837Z-steady-load"
+  ],
+  "non_paid_validation": "PASS",
+  "model_calls_authorized": false,
+  "test_counts": {
+    "passed": 218,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0
+  },
+  "non_paid_validation_scope": "20261026T070223Z-three-track-research: current full pytest and controlled external-effect comparison; historical load/P0/matrices retain their original run IDs",
+  "latest_incremental_validation": {
+    "run_id": "20261026T031046Z-evidence-hardening",
+    "scope": "experiment observation durability and archive consistency",
+    "status": "PASS_UNIT_AND_DATA_CONTRACTS",
+    "tests_passed": 112,
+    "tests_skipped": 0,
+    "full_runtime_rerun": false,
+    "services_started": false,
+    "model_calls": 0,
+    "baseline_archive_integrity_rechecked": true,
+    "evidence": [
+      "reports/20261026T031046Z-evidence-hardening/contracts-final.xml",
+      "reports/20261026T031046Z-evidence-hardening/previous-bundle-recheck.log",
+      "reports/20261026T031046Z-evidence-hardening/FINAL_REPORT.md"
+    ]
+  },
+  "current_work": {
+    "scope": "single-dev model preparation, controlled reliability comparison, personal exercise specification",
+    "status": "RESEARCH_STAGE_COMPLETE",
+    "model_calls_authorized": false,
+    "model_smoke": "PREPARED_NOT_AUTHORIZED",
+    "reliability_comparison": "36_TRIALS_COMPLETE_AND_AUDITED",
+    "personal_exercise": "SPEC_READY_USER_NOT_STARTED"
+  },
+  "latest_runtime_validation": {
+    "run_id": "20261026T032837Z-steady-load",
+    "tests_passed": 212,
+    "tests_skipped": 0,
+    "load_profile": "steady",
+    "concurrency": [
+      1,
+      2,
+      3
+    ],
+    "load_submissions": 270,
+    "load_succeeded": 270,
+    "journal_events": 810,
+    "unresolved_load_identities": 0,
+    "observer_sigkill_same_key_recovery": "PASS",
+    "real_model_calls": 0,
+    "model_experiment": "NOT_AUTHORIZED",
+    "evidence": [
+      "reports/20261026T032837Z-steady-load/final-test-results.xml",
+      "reports/20261026T032837Z-steady-load/load-database-audit.json",
+      "reports/20261026T032837Z-steady-load/observer-crash/result.json",
+      "reports/20261026T032837Z-steady-load/steady-capacity-summary.json",
+      "reports/20261026T032837Z-steady-load/resource-cleanup.json",
+      "reports/20261026T032837Z-steady-load/FINAL_REPORT.md"
+    ]
+  },
+  "prior_overload_validation": {
+    "run_id": "20261026T021326Z-docker-free-validation",
+    "concurrency": [
+      1,
+      5,
+      10
+    ],
+    "submissions": 270,
+    "outcomes": {
+      "SUCCEEDED": 108,
+      "REJECTED": 162
+    },
+    "reason": "QUOTA_EXCEEDED",
+    "evidence": "reports/20261026T021326Z-docker-free-validation/benchmarks/load-attempt-2/load_raw.jsonl",
+    "rerun_this_stage": false
+  },
+  "delivery_layout": "Current source/research reports; previous steady validation archive unchanged under history/, containing earlier baseline archives",
+  "research_tracks": {
+    "R1": {
+      "status": "PREPARED_NOT_AUTHORIZED",
+      "model_calls": 0,
+      "plan": "reports/20261026T070223Z-three-track-research/model-smoke-plan.json",
+      "remaining": "explicit model/account compatibility and positive budget authorization; then one dev smoke"
+    },
+    "R2": {
+      "status": "COMPLETE_FIXED_BARRIER_EXPERIMENT",
+      "trials": 36,
+      "controls": 6,
+      "crash_trials": 30,
+      "external_requests": 61,
+      "external_effects": 51,
+      "duplicate_effects_in_direct_control_arms": 15,
+      "runtime_duplicate_effects": 0,
+      "runtime_unsafe_needs_review": 5,
+      "explicit_test_operator_confirmations": 5,
+      "evidence": [
+        "reports/20261026T070223Z-three-track-research/reliability-comparison/raw.jsonl",
+        "reports/20261026T070223Z-three-track-research/comparison-audit.json"
+      ],
+      "limits": "constructed local effect probe; not production failure rate, generic exactly-once or framework ranking"
+    },
+    "R3": {
+      "status": "SPEC_READY_USER_NOT_STARTED",
+      "personal_mastery": "NOT_ASSESSED",
+      "assignment": "exercises/observation_diagnosis/README.md",
+      "user_implementation_provided": false
+    }
+  },
+  "latest_research_validation": {
+    "run_id": "20261026T070223Z-three-track-research",
+    "tests_passed": 218,
+    "tests_skipped": 0,
+    "ruff": "PASS",
+    "mypy_files": 86,
+    "evidence": [
+      "reports/20261026T070223Z-three-track-research/final-test-results-2.xml",
+      "reports/20261026T070223Z-three-track-research/comparison-audit.json",
+      "reports/20261026T070223Z-three-track-research/resource-cleanup-final.json",
+      "reports/20261026T070223Z-three-track-research/FINAL_REPORT.md"
+    ]
+  },
+  "productization": {
+    "started_on": "2026-10-29",
+    "status": "STARTED",
+    "milestone": "M1",
+    "plan": "docs/workbench_plan.md",
+    "environment": "docs/development_environment.md",
+    "completed": [
+      "read_only_host_inventory",
+      "authorized_docker_daemon_handshake",
+      "development_preflight_cli",
+      "product_and_learning_plan"
+    ],
+    "validation": {
+      "ruff_new_module": "PASS",
+      "mypy_new_module": "PASS",
+      "preflight": "CAUTION_LOW_DISK_DOCKER_NOT_CHECKED",
+      "strict_exit_code": 2,
+      "full_pytest_rerun": false
+    },
+    "historical_test_counts_unchanged": true,
+    "workspace_free_gib_observed": 6.61,
+    "memory_total_gib_observed": 14.99,
+    "model_calls_authorized": false,
+    "personal_mastery": "NOT_ASSESSED",
+    "next": "User defines independent exercise output contract; engineering proceeds to M2 API contracts. Recover disk headroom before large installs."
+  }
+}

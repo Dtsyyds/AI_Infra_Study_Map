@@ -1,0 +1,21 @@
+name: platform-static-and-data-contracts
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.lock
+      - run: ruff check core runtime api config tests examples deploy
+      - run: mypy
+      - run: python -m pytest tests/unit tests/repair -q
+# This is deliberately NOT the G0-G7 acceptance gate. Real PG/Docker/model runs
+# require an explicitly authorized environment and their independent evidence.

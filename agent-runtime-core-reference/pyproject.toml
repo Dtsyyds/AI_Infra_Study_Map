@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-runtime-core-reference"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.lock"]}
+
+[tool.setuptools.packages.find]
+include = ["core*", "runtime*", "api*", "config*", "examples*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = ["integration: real PostgreSQL", "process: independent processes", "docker: real Docker required", "mcp: real MCP stdio"]
+
+[tool.ruff]
+# Fixed defect assets are input data, never host-imported platform modules.
+exclude = ["examples/repair_cases"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.mypy]
+exclude = ["examples/repair_cases"]
+python_version = "3.11"
+files = ["core", "runtime", "api", "config", "examples"]
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.setuptools]
+include-package-data = true

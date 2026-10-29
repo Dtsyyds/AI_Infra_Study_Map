@@ -1,0 +1,110 @@
+{
+  "case-01": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "max(low, x)",
+        "new": "min(high, max(low, x))"
+      }
+    ]
+  },
+  "case-02": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "bool(value)",
+        "new": "value.strip().lower() in {\"true\", \"1\"}"
+      }
+    ]
+  },
+  "case-03": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "row[\"amount\"]",
+        "new": "row.get(\"amount\", 0)"
+      }
+    ]
+  },
+  "case-04": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "len(items)-size+1",
+        "new": "len(items)"
+      }
+    ]
+  },
+  "case-05": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "str(value)",
+        "new": "json.dumps(value, sort_keys=True)"
+      }
+    ]
+  },
+  "case-06": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "list(set(values))",
+        "new": "list(dict.fromkeys(values))"
+      }
+    ]
+  },
+  "case-07": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "values[len(values)//2]",
+        "new": "(values[(len(values)-1)//2] + values[len(values)//2]) / 2"
+      }
+    ]
+  },
+  "case-08": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "headers.get(name)",
+        "new": "next((v for k,v in headers.items() if k.lower() == name.lower()), None)"
+      }
+    ]
+  },
+  "case-09": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "return reader()",
+        "new": "return await reader()"
+      }
+    ]
+  },
+  "case-10": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "page * size",
+        "new": "(page - 1) * size"
+      }
+    ]
+  },
+  "case-11": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "{**supplied, **defaults}",
+        "new": "{**defaults, **supplied}"
+      }
+    ]
+  },
+  "case-12": {
+    "edits": [
+      {
+        "path": "src/solution.py",
+        "old": "milliseconds // 1000",
+        "new": "milliseconds / 1000"
+      }
+    ]
+  }
+}
