@@ -1,17 +1,17 @@
-"""真实 PostgreSQL：任务创建时持久化重试截止时间（8 个用例）。
+"""真实 PostgreSQL：任务创建时持久化重试截止时间和次数上限（23 个用例）。
 
-放置位置：month04_deploy/tests/test_task_deadline_creation_integration.py
-接口：TaskStore.create_task(..., retry_deadline_at: datetime | None = None)。
+放置位置：month04_deploy/tests/test_task_creation_integration.py
+接口：TaskStore.create_task(..., retry_deadline_at=None, max_attempts=1)。
 
 在项目根目录、agent-dev 环境且已设置 AGENT_DATABASE_URL 后运行：
     AGENT_RUN_DB_TESTS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
         python -m pytest -p pytest_asyncio.plugin --tb=short -x -q \
-        month04_deploy/tests/test_task_deadline_creation_integration.py
+        month04_deploy/tests/test_task_creation_integration.py
 
 每个用例创建独立随机 schema，执行真实迁移，最后删除自己的 schema。
 验证提交后的数据时使用新连接，不 mock SQL、连接或 fetchone。
 这个文件不会给 AGENT_DATABASE_URL 原先指向的 tasks 表补迁移。
-本轮仅验证迁移和创建入口，不声称重试事务已读取 Task 中的截止时间。
+本文件验证 005、006 迁移及创建入口；重试读取持久化上限由重试测试另行验证。
 """
 
 import os
@@ -83,10 +83,21 @@ def database_before_deadline():
 
 
 @pytest.fixture
-def store(database_before_deadline):
+def database_before_max_attempts(database_before_deadline):
+    """在独立 schema 中应用 005，保留尚未执行 006 的状态。"""
     dsn, deadline_migration = database_before_deadline
+    max_attempts_migration = deadline_migration.with_name("006_add_task_max_attempts.sql")
+    assert max_attempts_migration.is_file(), f"缺少迁移文件：{max_attempts_migration}"
     with psycopg.connect(dsn, connect_timeout=5) as conn:
         conn.execute(deadline_migration.read_text(encoding="utf-8"), prepare=False)
+    return dsn, max_attempts_migration
+
+
+@pytest.fixture
+def store(database_before_max_attempts):
+    dsn, max_attempts_migration = database_before_max_attempts
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        conn.execute(max_attempts_migration.read_text(encoding="utf-8"), prepare=False)
     return TaskStore(dsn)
 
 
@@ -202,4 +213,162 @@ def test_invalid_timezone_is_rejected_before_connecting_and_inserting(store, dea
         )
 
     assert checked_store.connect_calls == 0
+    assert read_tasks(store.dsn) == before
+
+
+def test_max_attempts_migration_preserves_existing_task_and_sets_default_one(
+    database_before_max_attempts,
+):
+    dsn, max_attempts_migration = database_before_max_attempts
+    task_id = uuid4()
+    deadline = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+    # 用旧 schema 支持的 SQL 创建任务，不调用已经依赖 006 的 create_task。
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks (task_id, task_type, payload, retry_deadline_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                task_id,
+                "demo.echo",
+                Jsonb({"text": "created before migration 006"}),
+                deadline,
+            ),
+        )
+    before = read_tasks(dsn)
+    assert len(before) == 1
+    assert "max_attempts" not in before[0]
+
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        conn.execute(max_attempts_migration.read_text(encoding="utf-8"), prepare=False)
+
+    assert read_tasks(dsn) == [{**before[0], "max_attempts": 1}]
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        column = conn.execute(
+            """
+            SELECT data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'tasks'
+              AND column_name = 'max_attempts'
+            """
+        ).fetchone()
+        constraint = conn.execute(
+            """
+            SELECT contype, convalidated
+            FROM pg_constraint
+            WHERE conrelid = 'tasks'::regclass
+              AND conname = 'tasks_max_attempts_positive'
+            """
+        ).fetchone()
+    assert column == ("integer", "NO", "1")
+    assert constraint == ("c", True)
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected_max_attempts",
+    [({}, 1), ({"max_attempts": 1}, 1), ({"max_attempts": 3}, 3)],
+    ids=["omitted", "explicit-one", "explicit-three"],
+)
+def test_create_commits_max_attempts_and_deadline_together(
+    store, kwargs, expected_max_attempts,
+):
+    deadline = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    payload = {"text": "fixed retry budget"}
+
+    created = store.create_task(
+        "demo.echo", payload, retry_deadline_at=deadline, **kwargs
+    )
+
+    assert created["status"] == "queued"
+    assert created["payload"] == payload
+    assert created["max_attempts"] == expected_max_attempts
+    assert created["retry_deadline_at"] == deadline
+    assert read_tasks(store.dsn) == [created]
+
+
+@pytest.mark.parametrize(
+    "max_attempts",
+    [None, True, False, "3", 3.0],
+    ids=["none", "true", "false", "string", "float"],
+)
+def test_invalid_max_attempts_type_is_rejected_before_connecting(store, max_attempts):
+    before = read_tasks(store.dsn)
+    checked_store = ConnectionCountingStore(store.dsn)
+
+    with pytest.raises(TypeError, match="max_attempts"):
+        checked_store.create_task(
+            "demo.echo", {"text": "invalid type"}, max_attempts=max_attempts
+        )
+
+    assert checked_store.connect_calls == 0
+    assert read_tasks(store.dsn) == before
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1], ids=["zero", "negative"])
+def test_nonpositive_max_attempts_is_rejected_before_connecting(store, max_attempts):
+    before = read_tasks(store.dsn)
+    checked_store = ConnectionCountingStore(store.dsn)
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        checked_store.create_task(
+            "demo.echo", {"text": "invalid value"}, max_attempts=max_attempts
+        )
+
+    assert checked_store.connect_calls == 0
+    assert read_tasks(store.dsn) == before
+
+
+def test_database_default_applies_when_insert_omits_max_attempts(store):
+    # 直接省略列，验证数据库 DEFAULT；create_task 会显式传入 Python 默认值。
+    with psycopg.connect(store.dsn, row_factory=dict_row, connect_timeout=5) as conn:
+        created = conn.execute(
+            """
+            INSERT INTO tasks (task_id, task_type, payload)
+            VALUES (%s, %s, %s)
+            RETURNING *
+            """,
+            (uuid4(), "demo.echo", Jsonb({"text": "database default"})),
+        ).fetchone()
+
+    assert created["max_attempts"] == 1
+    assert read_tasks(store.dsn) == [created]
+
+
+@pytest.mark.parametrize(
+    "max_attempts, error_type",
+    [
+        (None, psycopg.errors.NotNullViolation),
+        (0, psycopg.errors.CheckViolation),
+        (-1, psycopg.errors.CheckViolation),
+    ],
+    ids=["explicit-null", "zero", "negative"],
+)
+def test_database_rejects_invalid_max_attempts_without_inserting(
+    store, max_attempts, error_type,
+):
+    before = read_tasks(store.dsn)
+
+    # 绕过 Python 校验，验证数据库约束及失败插入的回滚。
+    with pytest.raises(error_type) as caught:
+        with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks (task_id, task_type, payload, max_attempts)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    uuid4(),
+                    "demo.echo",
+                    Jsonb({"text": "database constraint"}),
+                    max_attempts,
+                ),
+            )
+
+    if max_attempts is None:
+        assert caught.value.diag.column_name == "max_attempts"
+    else:
+        assert caught.value.diag.constraint_name == "tasks_max_attempts_positive"
     assert read_tasks(store.dsn) == before

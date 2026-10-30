@@ -329,7 +329,6 @@ def retry_task_once(
     retryable_error: bool,
     outcome_unknown: bool,
     replay_safe: bool,
-    max_attempts: int,
     crash_after_step: int | None = None,
 ) -> dict[str, Any] | RetryDecision | None:
     """领取一次重试，并从已保存的有效步骤继续执行。"""
@@ -347,7 +346,6 @@ def retry_task_once(
         retryable_error=retryable_error,
         outcome_unknown=outcome_unknown,
         replay_safe=replay_safe,
-        max_attempts=max_attempts,
     )
 
     # TODO 1：

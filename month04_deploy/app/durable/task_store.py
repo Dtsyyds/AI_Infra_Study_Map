@@ -30,6 +30,7 @@ class TaskStore:
         payload: dict[str, Any],
         *,
         retry_deadline_at: datetime | None = None,
+        max_attempts: int = 1,
     ) -> dict[str, Any]:
         if retry_deadline_at is not None:
             # 检查时区
@@ -38,6 +39,11 @@ class TaskStore:
                 or retry_deadline_at.utcoffset() is None
             ):
                 raise ValueError("retry_deadline_at 必须带时区")
+            
+        if type(max_attempts) is not int:
+            raise TypeError("传入的 max_attempts 数据类型错误")
+        if max_attempts < 1:
+            raise ValueError("max_attempts 必须是大于 0 的整数")
         task_id = uuid4()
 
         sql = """
@@ -45,9 +51,10 @@ class TaskStore:
                 task_id,
                 task_type,
                 payload,
-                retry_deadline_at
+                retry_deadline_at,
+                max_attempts
             )
-            VALUES (%s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING *
         """
 
@@ -59,7 +66,7 @@ class TaskStore:
             # 三个参数依次为：
             # task_id、task_type、经过 Jsonb 包装的 payload。
             with conn.cursor() as cur:
-                cur.execute(sql, (task_id, task_type, Jsonb(payload), retry_deadline_at))
+                cur.execute(sql, (task_id, task_type, Jsonb(payload), retry_deadline_at, max_attempts))
                 row = cur.fetchone()
 
             if row is None:
@@ -205,14 +212,28 @@ class TaskStore:
         task_type: str,
         payload: dict[str, Any],
         idempotency_key: str,
+        *,
+        retry_deadline_at: datetime | None = None,
+        max_attempts: int = 1,
     ) -> dict[str, Any]:
         """创建任务，或复用相同 key、相同内容的已有任务。"""
-
         if (
             not isinstance(idempotency_key, str)
             or not 1 <= len(idempotency_key) <= 128
         ):
             raise ValueError("idempotency_key 长度必须为 1～128")
+        if retry_deadline_at is not None:
+            # 检查时区
+            if (
+                retry_deadline_at.tzinfo is None
+                or retry_deadline_at.utcoffset() is None
+            ):
+                raise ValueError("retry_deadline_at 必须带时区")
+            
+        if type(max_attempts) is not int:
+            raise TypeError("传入的 max_attempts 数据类型错误")
+        if max_attempts < 1:
+            raise ValueError("max_attempts 必须是大于 0 的整数")
 
         fingerprint = build_request_fingerprint(
             task_type,
@@ -225,9 +246,11 @@ class TaskStore:
                 task_type,
                 payload,
                 idempotency_key,
-                request_fingerprint
+                request_fingerprint,
+                retry_deadline_at,
+                max_attempts
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING *
         """
@@ -254,6 +277,8 @@ class TaskStore:
                         Jsonb(payload),
                         idempotency_key,
                         fingerprint,
+                        retry_deadline_at,
+                        max_attempts
                     ),
                 )
                 row = cur.fetchone()
@@ -275,7 +300,11 @@ class TaskStore:
                     # 与本次 fingerprint。
                     # 不一致时抛出 IdempotencyConflictError。
                     # 一致时继续执行，不修改原任务。
-                    if row["request_fingerprint"] != fingerprint:
+                    if (
+                        row["request_fingerprint"] != fingerprint
+                        or row["retry_deadline_at"] != retry_deadline_at
+                        or row["max_attempts"] != max_attempts
+                    ):
                         raise IdempotencyConflictError(
                             "幂等键已存在，但请求内容不一致"
                         )
@@ -541,7 +570,6 @@ class TaskStore:
         retryable_error: bool,
         outcome_unknown: bool,
         replay_safe: bool,
-        max_attempts: int,
     ):
         """重试领取的练习骨架，尚未完成。"""
         with self._connect() as conn:
@@ -601,7 +629,7 @@ class TaskStore:
                     outcome_unknown=outcome_unknown,
                     replay_safe=replay_safe,
                     attempts_used=latest_attempt["attempt_no"],
-                    max_attempts=max_attempts,
+                    max_attempts=task_row["max_attempts"],
                     time_budget_remaining=time_budget_remaining,
                 )
 

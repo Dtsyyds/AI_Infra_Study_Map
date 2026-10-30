@@ -1,15 +1,15 @@
-"""真实 PostgreSQL：读取 Task 固定截止时间的重试领取验收（30 个用例）。
+"""真实 PostgreSQL：读取 Task 固定截止时间和次数上限的重试领取验收（32 个用例）。
 
 放置位置：month04_deploy/tests/test_task_retry_integration.py
-接口基准：create_task(retry_deadline_at=...) 保存截止时间；重试入口不再接收它。
-实现依据：本轮上传的 TaskStore；迁移 005 为 Task 添加可空的截止时间列。
+接口基准：create_task(retry_deadline_at=..., max_attempts=...) 保存固定预算。
+重试入口只接收任务标识和策略事实，不再接收截止时间或次数上限。
 
 在项目根目录、已设置 AGENT_DATABASE_URL 的 agent-dev 环境中运行：
     AGENT_RUN_DB_TESTS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
         python -m pytest -p pytest_asyncio.plugin --tb=short \
         -q month04_deploy/tests/test_task_retry_integration.py
 
-每个用例使用独立随机 schema，应用 001～005 迁移，结束后删除自己的 schema。
+每个用例使用独立随机 schema，应用 001～006 迁移，结束后删除自己的 schema。
 故障注入只作用于该 schema；不 mock 连接、SQL 或 fetchone。
 提交或回滚后用新连接读取完整 Task、Attempt 和步骤记录。
 
@@ -17,6 +17,7 @@
 策略条件由测试显式提供；Attempt 从 1 连续编号且历史不删除。
 默认截止时间在创建 Task 前用数据库时钟加 10 分钟生成，只在创建时写入。
 重试辅助函数不读取、生成或改写截止时间；NULL 表示没有重试预算。
+需要重试的测试任务在创建时显式设置 max_attempts，默认使用 3。
 新增真实行锁等待测试，用 pg_blocking_pids 确认阻塞已发生，再等待截止时间。
 """
 
@@ -62,6 +63,7 @@ def store():
         migrations_dir / "003_add_task_idempotency.sql",
         migrations_dir / "004_create_task_attempts.sql",
         migrations_dir / "005_add_task_retry_deadline.sql",
+        migrations_dir / "006_add_task_max_attempts.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -123,15 +125,17 @@ def assert_claimed(value):
 
 
 def make_failed_task(
-    store: TaskStore, *, retry_deadline_at=DEFAULT_DEADLINE
+    store: TaskStore, *, retry_deadline_at=DEFAULT_DEADLINE, max_attempts: int = 3
 ) -> tuple[UUID, UUID]:
     """用已实现的接口准备一次失败，保留一个已提交的步骤。"""
     if retry_deadline_at is DEFAULT_DEADLINE:
         retry_deadline_at = deadline_for_creation(store)
     created = store.create_task(
-        "demo.echo", {"text": "retry acceptance"}, retry_deadline_at=retry_deadline_at
+        "demo.echo", {"text": "retry acceptance"},
+        retry_deadline_at=retry_deadline_at, max_attempts=max_attempts,
     )
     assert created["retry_deadline_at"] == retry_deadline_at
+    assert created["max_attempts"] == max_attempts
     task_id = created["task_id"]
     _, attempt = assert_claimed(store.try_start_task_with_attempt(task_id))
     store.save_completed_step(
@@ -167,7 +171,6 @@ def retry(store: TaskStore, task_id: UUID, expected_attempt_id: UUID, **override
         "retryable_error": True,
         "outcome_unknown": False,
         "replay_safe": True,
-        "max_attempts": 3,
     }
     policy.update(overrides)
     return store.try_retry_task_with_attempt(task_id, expected_attempt_id, **policy)
@@ -223,6 +226,7 @@ def test_retried_attempt_can_succeed_without_rewriting_old_failure(store):
     assert task["result"] == result
     assert task["error"] is None
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
+    assert task["max_attempts"] == before[0]["max_attempts"]
     assert len(attempts) == 2
     assert attempts[0] == before[1][0]
     assert attempts[1]["finished_at"] is not None
@@ -235,39 +239,40 @@ def test_retried_attempt_can_succeed_without_rewriting_old_failure(store):
 
 
 @pytest.mark.parametrize(
-    ("deadline_kind", "overrides", "expected"),
+    ("deadline_kind", "max_attempts", "overrides", "expected"),
     [
-        pytest.param("future", {"retryable_error": False}, RetryDecision.STOP, id="non-retryable"),
-        pytest.param("future", {"max_attempts": 1}, RetryDecision.STOP, id="attempts-exhausted"),
+        pytest.param("future", 3, {"retryable_error": False}, RetryDecision.STOP, id="non-retryable"),
+        pytest.param("future", 1, {}, RetryDecision.STOP, id="attempts-exhausted"),
         pytest.param(
-            "expired", {},
+            "expired", 3, {},
             RetryDecision.STOP,
             id="deadline-expired",
         ),
         pytest.param(
-            "future", {"outcome_unknown": True, "replay_safe": False},
+            "future", 3, {"outcome_unknown": True, "replay_safe": False},
             RetryDecision.RECONCILE,
             id="unknown-unsafe",
         ),
         pytest.param(
-            "expired",
+            "expired", 1,
             {
                 "outcome_unknown": True,
                 "replay_safe": False,
                 "retryable_error": False,
-                "max_attempts": 1,
             },
             RetryDecision.RECONCILE,
             id="reconcile-before-stop",
         ),
-        pytest.param("null", {}, RetryDecision.STOP, id="null-deadline-stops"),
+        pytest.param("null", 3, {}, RetryDecision.STOP, id="null-deadline-stops"),
         pytest.param(
-            "null", {"outcome_unknown": True, "replay_safe": False},
+            "null", 3, {"outcome_unknown": True, "replay_safe": False},
             RetryDecision.RECONCILE, id="null-deadline-still-reconciles",
         ),
     ],
 )
-def test_policy_rejection_preserves_all_rows(store, deadline_kind, overrides, expected):
+def test_policy_rejection_preserves_all_rows(
+    store, deadline_kind, max_attempts, overrides, expected,
+):
     if deadline_kind == "future":
         deadline = deadline_for_creation(store)
     elif deadline_kind == "expired":
@@ -275,7 +280,9 @@ def test_policy_rejection_preserves_all_rows(store, deadline_kind, overrides, ex
     else:
         assert deadline_kind == "null"
         deadline = None
-    task_id, old_attempt_id = make_failed_task(store, retry_deadline_at=deadline)
+    task_id, old_attempt_id = make_failed_task(
+        store, retry_deadline_at=deadline, max_attempts=max_attempts
+    )
     before = read_state(store, task_id)
 
     assert retry(store, task_id, old_attempt_id, **overrides) is expected
@@ -472,7 +479,8 @@ def test_task_update_zero_rows_raises_without_creating_attempt(store):
 
 
 def test_two_concurrent_retry_requests_only_one_claims(store):
-    task_id, old_attempt_id = make_failed_task(store)
+    # 两个请求竞争仅剩的一次执行额度。
+    task_id, old_attempt_id = make_failed_task(store, max_attempts=2)
     before = read_state(store, task_id)
     barrier = Barrier(2)
 
@@ -510,6 +518,61 @@ def test_retry_cannot_override_expired_persisted_deadline(store):
 
     assert read_state(store, task_id) == before
     assert retry(store, task_id, old_attempt_id) is RetryDecision.STOP
+    assert read_state(store, task_id) == before
+
+
+def test_retry_cannot_override_persisted_max_attempts(store):
+    task_id, old_attempt_id = make_failed_task(store, max_attempts=1)
+    before = read_state(store, task_id)
+
+    with pytest.raises(TypeError, match="max_attempts"):
+        retry(store, task_id, old_attempt_id, max_attempts=10)
+
+    assert read_state(store, task_id) == before
+    assert retry(store, task_id, old_attempt_id) is RetryDecision.STOP
+    assert read_state(store, task_id) == before
+
+
+def test_persisted_limit_stops_fourth_attempt_after_three_failures(store):
+    task_id, latest_attempt_id = make_failed_task(store, max_attempts=3)
+    original_task, _, original_steps = read_state(store, task_id)
+
+    for expected_no in (2, 3):
+        before = read_state(store, task_id)
+        task, attempt = assert_claimed(retry(store, task_id, latest_attempt_id))
+        assert task["max_attempts"] == 3
+        assert task["retry_deadline_at"] == original_task["retry_deadline_at"]
+        assert attempt["attempt_no"] == expected_no
+        assert read_state(store, task_id) == (
+            task, [*before[1], attempt], original_steps
+        )
+
+        error = {
+            "type": "TransientTestError",
+            "message": f"attempt {expected_no} failed",
+        }
+        failed = store.try_fail_task_with_attempt(
+            task_id, attempt["attempt_id"], error
+        )
+        task, attempts, steps = read_state(store, task_id)
+        assert failed is not None and task == failed
+        assert task["status"] == "failed"
+        assert task["max_attempts"] == 3
+        assert task["retry_deadline_at"] == original_task["retry_deadline_at"]
+        assert attempts[:-1] == before[1]
+        assert attempts[-1]["status"] == "failed"
+        assert attempts[-1]["error"] == error
+        assert attempts[-1]["finished_at"] is not None
+        assert steps == original_steps
+        latest_attempt_id = attempt["attempt_id"]
+
+    before = read_state(store, task_id)
+    assert [a["attempt_no"] for a in before[1]] == [1, 2, 3]
+    assert all(a["status"] == "failed" for a in before[1])
+
+    assert retry(store, task_id, latest_attempt_id) is RetryDecision.STOP
+
+    # 不创建第四条 Attempt，也不覆盖第三次失败或历史错误、时间戳。
     assert read_state(store, task_id) == before
 
 

@@ -1,14 +1,15 @@
-"""真实 PostgreSQL：Worker 读取 Task 固定截止时间的重试验收（20 个用例）。
+"""真实 PostgreSQL：Worker 使用 Task 固定重试预算的验收（22 个用例）。
 
 放置位置：month04_deploy/tests/test_worker_retry_integration.py
-接口基准：create_task(retry_deadline_at=...) 保存截止时间，retry_task_once 不再接收它。
+接口基准：create_task(retry_deadline_at=..., max_attempts=...) 保存固定预算。
+retry_task_once 不再接收截止时间或次数上限。
 
 在项目根目录、已设置 AGENT_DATABASE_URL 的 agent-dev 环境运行：
     AGENT_RUN_DB_TESTS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
         python -m pytest -p pytest_asyncio.plugin --tb=short \
         -x -q month04_deploy/tests/test_worker_retry_integration.py
 
-每例创建独立随机 schema，应用 001～005 迁移，结束后删除自己的 schema。
+每例创建独立随机 schema，应用 001～006 迁移，结束后删除自己的 schema。
 真实执行 TaskStore 的 SQL，不 mock 连接或领取/完成方法；用新连接核对提交结果。
 monkeypatch 仅观察步骤调用及注入可控的步骤错误；崩溃用真实子进程验证。
 
@@ -16,7 +17,8 @@ monkeypatch 仅观察步骤调用及注入可控的步骤错误；崩溃用真�
 ValueError 只用于测试既有错误处理路径，不代表所有 ValueError 都允许重试。
 复用检查点的前提是任务输入和步骤版本保持不变、已保存结果可继续使用。
 默认截止时间在创建 Task 前用数据库时钟加 10 分钟生成，只在创建时写入。
-崩溃实验子进程直接通过存储层读取 Task 中的截止时间，不从命令行接收它。
+需要重试的测试任务在创建时显式设置 max_attempts，默认使用 3。
+崩溃实验子进程通过存储层读取 Task 中的固定预算，不额外传入预算参数。
 """
 
 from copy import deepcopy
@@ -49,7 +51,6 @@ POLICY = {
     "retryable_error": True,
     "outcome_unknown": False,
     "replay_safe": True,
-    "max_attempts": 3,
 }
 DEFAULT_DEADLINE = object()
 
@@ -72,6 +73,7 @@ def store():
         migrations_dir / "003_add_task_idempotency.sql",
         migrations_dir / "004_create_task_attempts.sql",
         migrations_dir / "005_add_task_retry_deadline.sql",
+        migrations_dir / "006_add_task_max_attempts.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -125,13 +127,16 @@ def read_state(store: TaskStore, task_id: UUID):
 
 
 def make_failed_task(
-    store: TaskStore, saved_count: int = 1, *, retry_deadline_at=DEFAULT_DEADLINE
+    store: TaskStore, saved_count: int = 1, *,
+    retry_deadline_at=DEFAULT_DEADLINE, max_attempts: int = 3,
 ):
     """用真实存储接口准备失败 Task 和有效步骤前缀。
 
     saved_count=3 是人为准备的边界状态，用于验证无需重跑步骤也能完成新 Attempt。
     """
-    created = create_task_for_retry(store, retry_deadline_at=retry_deadline_at)
+    created = create_task_for_retry(
+        store, retry_deadline_at=retry_deadline_at, max_attempts=max_attempts
+    )
     task_id = created["task_id"]
     claimed = store.try_start_task_with_attempt(task_id)
     assert isinstance(claimed, tuple) and len(claimed) == 2
@@ -156,13 +161,17 @@ def deadline_for_creation(store: TaskStore) -> datetime:
     return now + timedelta(minutes=10)
 
 
-def create_task_for_retry(store: TaskStore, *, retry_deadline_at=DEFAULT_DEADLINE):
+def create_task_for_retry(
+    store: TaskStore, *, retry_deadline_at=DEFAULT_DEADLINE, max_attempts: int = 3,
+):
     if retry_deadline_at is DEFAULT_DEADLINE:
         retry_deadline_at = deadline_for_creation(store)
     created = store.create_task(
-        "demo.echo", {"text": TEXT}, retry_deadline_at=retry_deadline_at
+        "demo.echo", {"text": TEXT},
+        retry_deadline_at=retry_deadline_at, max_attempts=max_attempts,
     )
     assert created["retry_deadline_at"] == retry_deadline_at
+    assert created["max_attempts"] == max_attempts
     return created
 
 
@@ -175,15 +184,15 @@ def retry(store: TaskStore, task_id: UUID, expected_attempt_id: UUID, **override
     return worker.retry_task_once(store, task_id, expected_attempt_id, **arguments)
 
 
-def observe_steps(monkeypatch, *, fail_once_at=None):
-    """保留步骤名称和正常运算，只记录输入，按需让指定步骤第一次调用失败。"""
+def observe_steps(monkeypatch, *, fail_once_at=None, fail_always_at=None):
+    """观察真实步骤输入；可注入一次失败或在指定步骤每次调用时失败。"""
     calls = []
     injected = set()
 
     def wrap(index, operation):
         def observed(state):
             calls.append((index, deepcopy(state)))
-            if index == fail_once_at and index not in injected:
+            if index == fail_always_at or (index == fail_once_at and index not in injected):
                 injected.add(index)
                 raise ValueError(INJECTED_ERROR)
             return operation(state)
@@ -217,6 +226,7 @@ def assert_succeeded_retry(store, task_id, finished, before):
     assert task["error"] is None
     assert task["payload"] == before[0]["payload"]
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
+    assert task["max_attempts"] == before[0]["max_attempts"]
     assert len(attempts) == 2
     assert attempts[0] == before[1][0]
     assert attempts[1]["attempt_id"] != attempts[0]["attempt_id"]
@@ -287,39 +297,38 @@ def test_retry_handles_checkpoint_boundary(store, monkeypatch, saved_count):
 
 
 @pytest.mark.parametrize(
-    ("deadline_kind", "overrides", "expected"),
+    ("deadline_kind", "max_attempts", "overrides", "expected"),
     [
-        pytest.param("future", {"retryable_error": False}, RetryDecision.STOP, id="not-retryable"),
-        pytest.param("future", {"max_attempts": 1}, RetryDecision.STOP, id="attempts-exhausted"),
+        pytest.param("future", 3, {"retryable_error": False}, RetryDecision.STOP, id="not-retryable"),
+        pytest.param("future", 1, {}, RetryDecision.STOP, id="attempts-exhausted"),
         pytest.param(
-            "expired", {},
+            "expired", 3, {},
             RetryDecision.STOP,
             id="deadline-expired",
         ),
         pytest.param(
-            "future", {"outcome_unknown": True, "replay_safe": False},
+            "future", 3, {"outcome_unknown": True, "replay_safe": False},
             RetryDecision.RECONCILE,
             id="unknown-unsafe",
         ),
-        pytest.param("null", {}, RetryDecision.STOP, id="null-deadline-stops"),
+        pytest.param("null", 3, {}, RetryDecision.STOP, id="null-deadline-stops"),
         pytest.param(
-            "null", {"outcome_unknown": True, "replay_safe": False},
+            "null", 3, {"outcome_unknown": True, "replay_safe": False},
             RetryDecision.RECONCILE, id="null-deadline-still-reconciles",
         ),
         pytest.param(
-            "expired",
+            "expired", 1,
             {
                 "outcome_unknown": True,
                 "replay_safe": False,
                 "retryable_error": False,
-                "max_attempts": 1,
             },
             RetryDecision.RECONCILE, id="expired-budget-still-reconciles",
         ),
     ],
 )
 def test_policy_refusal_returns_decision_without_execution_or_changes(
-    store, monkeypatch, deadline_kind, overrides, expected
+    store, monkeypatch, deadline_kind, max_attempts, overrides, expected
 ):
     if deadline_kind == "future":
         deadline = deadline_for_creation(store)
@@ -328,7 +337,9 @@ def test_policy_refusal_returns_decision_without_execution_or_changes(
     else:
         assert deadline_kind == "null"
         deadline = None
-    task_id, old_attempt_id = make_failed_task(store, retry_deadline_at=deadline)
+    task_id, old_attempt_id = make_failed_task(
+        store, retry_deadline_at=deadline, max_attempts=max_attempts
+    )
     before = read_state(store, task_id)
     forbid_steps(monkeypatch)
 
@@ -348,6 +359,65 @@ def test_retry_rejects_deadline_override_without_execution_or_changes(store, mon
 
     with pytest.raises(TypeError, match="retry_deadline_at"):
         retry(store, task_id, old_attempt_id, retry_deadline_at=later_deadline)
+
+    assert read_state(store, task_id) == before
+
+
+def test_retry_rejects_max_attempts_override_without_execution_or_changes(store, monkeypatch):
+    task_id, old_attempt_id = make_failed_task(store, max_attempts=1)
+    before = read_state(store, task_id)
+    forbid_steps(monkeypatch)
+
+    with pytest.raises(TypeError, match="max_attempts"):
+        retry(store, task_id, old_attempt_id, max_attempts=10)
+
+    assert read_state(store, task_id) == before
+    assert retry(store, task_id, old_attempt_id) is RetryDecision.STOP
+    assert read_state(store, task_id) == before
+
+
+def test_worker_stops_after_three_failures_without_executing_fourth_attempt(
+    store, monkeypatch,
+):
+    calls = observe_steps(monkeypatch, fail_always_at=1)
+    created = create_task_for_retry(store, max_attempts=3)
+    task_id = created["task_id"]
+
+    with pytest.raises(ValueError, match=INJECTED_ERROR):
+        worker.run_task_once(store, task_id)
+
+    before = read_state(store, task_id)
+    assert before[0]["status"] == "failed"
+    assert [a["attempt_no"] for a in before[1]] == [1]
+    assert [s["step_index"] for s in before[2]] == [0]
+    latest_attempt_id = before[1][-1]["attempt_id"]
+
+    for expected_no in (2, 3):
+        before = read_state(store, task_id)
+        with pytest.raises(ValueError, match=INJECTED_ERROR):
+            retry(store, task_id, latest_attempt_id)
+
+        task, attempts, steps = read_state(store, task_id)
+        assert task["status"] == "failed"
+        assert task["max_attempts"] == 3
+        assert task["retry_deadline_at"] == created["retry_deadline_at"]
+        assert task["error"]["step_index"] == 1
+        assert attempts[:-1] == before[1]
+        assert attempts[-1]["attempt_no"] == expected_no
+        assert attempts[-1]["status"] == "failed"
+        assert attempts[-1]["error"] == task["error"]
+        assert attempts[-1]["finished_at"] is not None
+        assert steps == before[2]
+        latest_attempt_id = attempts[-1]["attempt_id"]
+
+    # 首次执行步骤 0、1；两次重试都从步骤 1 开始，不重复步骤 0。
+    assert [index for index, _ in calls] == [0, 1, 1, 1]
+    before = read_state(store, task_id)
+    assert [a["attempt_no"] for a in before[1]] == [1, 2, 3]
+    assert all(a["status"] == "failed" for a in before[1])
+    forbid_steps(monkeypatch)
+
+    assert retry(store, task_id, latest_attempt_id) is RetryDecision.STOP
 
     assert read_state(store, task_id) == before
 
@@ -398,6 +468,7 @@ def test_retry_step_failure_is_saved_to_new_attempt_and_propagates(store, monkey
     assert task["status"] == "failed" and task["result"] is None
     assert task["error"] == expected_error
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
+    assert task["max_attempts"] == before[0]["max_attempts"]
     assert len(attempts) == 2 and attempts[0] == before[1][0]
     assert attempts[1]["attempt_id"] != old_attempt_id
     assert attempts[1]["attempt_no"] == 2 and attempts[1]["status"] == "failed"
@@ -482,7 +553,6 @@ retry_task_once(
     retryable_error=True,
     outcome_unknown=False,
     replay_safe=True,
-    max_attempts=3,
     crash_after_step=1,
 )
 raise AssertionError("预期在步骤 1 提交后以退出码 86 崩溃")
