@@ -5,7 +5,7 @@ AGENT_RUN_DB_TESTS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
     -p pytest_asyncio.plugin --tb=short -x -q \
     month04_deploy/tests/test_tool_call_idempotency_integration.py
 
-每个用例使用独立随机 schema，按顺序加载 001～008 迁移并在结束后清理。
+每个用例使用独立随机 schema 并在结束后清理。默认加载 001～009，升级用例先在 008 中写入旧数据。
 通过新连接读取提交后的完整记录；故障注入只作用于当前测试 schema。
 子进程测试调用 TaskStore，退出后由父进程显式标记失败、安排并领取重试。
 本文件验收存储层工具事务；Worker 的工具接入与自动恢复另行验收。
@@ -36,17 +36,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 COUNTER_NAME = "ledger-acceptance-counter"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+STATUS_MIGRATION = MIGRATIONS_DIR / "009_add_tool_call_status.sql"
 
 
 @pytest.fixture
-def store():
+def store(request):
     base_dsn = os.getenv("AGENT_DATABASE_URL")
     assert base_dsn, "已启用数据库测试，但缺少 AGENT_DATABASE_URL"
     assert callable(getattr(TaskStore, "try_increment_counter_once", None)), (
         "实际导入的 TaskStore 缺少 try_increment_counter_once"
     )
 
-    migrations_dir = Path(__file__).resolve().parents[1] / "migrations"
     names = (
         "001_create_tasks.sql",
         "002_create_task_steps.sql",
@@ -57,7 +58,9 @@ def store():
         "007_add_task_next_retry_at.sql",
         "008_create_tool_calls.sql",
     )
-    migrations = [migrations_dir / name for name in names]
+    migrations = [MIGRATIONS_DIR / name for name in names]
+    if getattr(request, "param", None) != "before_009":
+        migrations.append(STATUS_MIGRATION)
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
 
@@ -181,6 +184,7 @@ def assert_call(row, task_id, result, *, step_index=0, call_index=0):
     assert row["call_index"] == call_index
     assert row["tool_name"] == "demo.counter_increment_v1"
     assert row["input_fingerprint"]
+    assert row["status"] == "succeeded"
     assert row["result"] == result
     assert row["completed_at"] is not None
 
@@ -551,4 +555,443 @@ def test_database_enforces_both_tool_call_uniqueness_constraints(store, duplicat
             """, (duplicate_id, duplicate_index, original["tool_call_id"]))
 
     assert caught.value.diag.table_name == "tool_calls"
+    assert read_state(store) == before
+
+
+@pytest.mark.parametrize("store", ["before_009"], indirect=True)
+def test_009_upgrades_committed_call_and_preserves_original_result(store):
+    task_id, attempt_id = make_running_task(store)
+    seed_counter(store, 7)
+    expected = {"counter_name": COUNTER_NAME, "value": 8}
+    assert increment(store, task_id, attempt_id) == expected
+
+    before = read_state(store)
+    assert len(before["calls"]) == 1
+    old_call = before["calls"][0]
+    assert "status" not in old_call
+    assert old_call["result"] == expected
+    assert old_call["completed_at"] is not None
+
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute(STATUS_MIGRATION.read_text(encoding="utf-8"), prepare=False)
+
+    upgraded = read_state(store)
+    assert upgraded == {
+        **before,
+        "calls": [{**old_call, "status": "succeeded"}],
+    }
+    assert increment(store, task_id, attempt_id) == expected
+    assert read_state(store) == upgraded
+
+
+def insert_status_fixture_row(store, task_id, status, result_json, has_completed_at):
+    """直接插入测试行，让 PostgreSQL 校验状态与两个可空字段的组合。"""
+    call_id = uuid4()
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute(
+            """
+            INSERT INTO tool_calls (
+                tool_call_id, task_id, step_index, call_index, tool_name,
+                input_fingerprint, status, result, completed_at
+            )
+            VALUES (
+                %s, %s, 0, 0, 'demo.external_v1', 'fixture-fingerprint',
+                %s, %s::jsonb, CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END
+            )
+            """,
+            (call_id, task_id, status, result_json, has_completed_at),
+        )
+    return call_id
+
+
+@pytest.mark.parametrize("status", ["started", "unknown"])
+def test_009_stores_unresolved_call_without_result_or_completion_time(store, status):
+    task_id, _ = make_running_task(store)
+    call_id = insert_status_fixture_row(store, task_id, status, None, False)
+
+    calls = read_state(store)["calls"]
+    assert len(calls) == 1
+    row = calls[0]
+    assert row["tool_call_id"] == call_id
+    assert row["status"] == status
+    assert row["result"] is None
+    assert row["completed_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "result_json", "has_completed_at"),
+    [
+        pytest.param("succeeded", None, True, id="success-missing-result"),
+        pytest.param("succeeded", "{}", False, id="success-missing-time"),
+        pytest.param("started", "{}", False, id="started-with-result"),
+        pytest.param("started", None, True, id="started-with-time"),
+        pytest.param("unknown", "{}", False, id="unknown-with-result"),
+        pytest.param("unknown", None, True, id="unknown-with-time"),
+        pytest.param("unlisted-status", None, False, id="unlisted-status"),
+    ],
+)
+def test_009_refuses_inconsistent_call(store, status, result_json, has_completed_at):
+    task_id, _ = make_running_task(store)
+    before = read_state(store)
+
+    with pytest.raises(psycopg.errors.CheckViolation) as caught:
+        insert_status_fixture_row(store, task_id, status, result_json, has_completed_at)
+
+    assert caught.value.diag.constraint_name == "tool_calls_status_result_check"
+    assert read_state(store) == before
+
+
+def prepare_external(
+    store, task_id, attempt_id, *,
+    tool_name="demo.external_ticket_v1", arguments=None, call_index=0,
+):
+    if arguments is None:
+        arguments = {"queue": "infra", "priority": 2}
+    return store.try_prepare_external_tool_call(
+        task_id,
+        attempt_id,
+        step_index=0,
+        call_index=call_index,
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+
+
+def test_prepare_external_commits_started_and_only_first_caller_may_send(store):
+    task_id, attempt_id = make_running_task(store)
+    before = read_state(store)
+
+    row, inserted = prepare_external(store, task_id, attempt_id)
+    assert inserted is True
+    assert isinstance(row["tool_call_id"], UUID)
+    assert (row["task_id"], row["step_index"], row["call_index"]) == (task_id, 0, 0)
+    assert row["tool_name"] == "demo.external_ticket_v1"
+    assert row["input_fingerprint"]
+    assert (row["status"], row["result"], row["completed_at"]) == ("started", None, None)
+    committed = read_state(store)
+    assert committed == {**before, "calls": [row]}
+
+    # 相同参数使用另一种键顺序，另一实例应只读取已提交的意图。
+    duplicate = prepare_external(
+        TaskStore(store.dsn), task_id, attempt_id,
+        arguments={"priority": 2, "queue": "infra"},
+    )
+    assert duplicate == (row, False)
+    assert read_state(store) == committed
+
+
+def test_prepare_external_handles_same_position_with_another_stored_uuid(store):
+    task_id, attempt_id = make_running_task(store)
+    original, inserted = prepare_external(store, task_id, attempt_id)
+    assert inserted is True
+    other_id = uuid4()
+    # 构造同一逻辑位置已有不同 UUID 的旧记录，专门验证 ON CONFLICT 的目标。
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute(
+            "UPDATE tool_calls SET tool_call_id = %s WHERE tool_call_id = %s",
+            (other_id, original["tool_call_id"]),
+        )
+    before = read_state(store)
+    assert before["calls"] == [{**original, "tool_call_id": other_id}]
+
+    assert prepare_external(store, task_id, attempt_id) == (before["calls"][0], False)
+    assert read_state(store) == before
+
+
+@pytest.mark.parametrize("status", ["succeeded", "unknown"])
+def test_prepare_external_preserves_existing_outcome(store, status):
+    task_id, attempt_id = make_running_task(store)
+    first, inserted = prepare_external(store, task_id, attempt_id)
+    assert inserted is True
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        if status == "succeeded":
+            conn.execute("""
+                UPDATE tool_calls
+                SET status = 'succeeded', result = '{"receipt": "ticket-7"}'::jsonb,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE tool_call_id = %s AND status = 'started'
+            """, (first["tool_call_id"],))
+        else:
+            conn.execute("""
+                UPDATE tool_calls SET status = 'unknown'
+                WHERE tool_call_id = %s AND status = 'started'
+            """, (first["tool_call_id"],))
+    before = read_state(store)
+    assert before["calls"][0]["status"] == status
+
+    assert prepare_external(store, task_id, attempt_id) == (before["calls"][0], False)
+    assert read_state(store) == before
+
+
+@pytest.mark.parametrize("change", ["arguments", "tool-name"])
+def test_prepare_external_rejects_changed_request_without_overwriting_started(store, change):
+    task_id, attempt_id = make_running_task(store)
+    row, inserted = prepare_external(store, task_id, attempt_id)
+    assert inserted is True and row["status"] == "started"
+    before = read_state(store)
+    overrides = (
+        {"arguments": {"queue": "another-queue", "priority": 2}}
+        if change == "arguments" else {"tool_name": "demo.other_v1"}
+    )
+
+    with pytest.raises(ValueError, match="同一工具调用的名称或参数发生变化"):
+        prepare_external(store, task_id, attempt_id, **overrides)
+    assert read_state(store) == before
+
+
+def test_prepare_external_new_attempt_can_read_confirmed_result_and_old_attempt_is_refused(store):
+    task_id, old_id = make_running_task(store)
+    row, inserted = prepare_external(store, task_id, old_id)
+    assert inserted is True
+    # 准备已确认成功的工具结果。之后失败的是同一 Task 的后续步骤。
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute("""
+            UPDATE tool_calls
+            SET status = 'succeeded', result = '{"receipt": "ticket-8"}'::jsonb,
+                completed_at = CURRENT_TIMESTAMP
+            WHERE tool_call_id = %s AND status = 'started'
+        """, (row["tool_call_id"],))
+    confirmed = read_state(store)["calls"][0]
+    assert confirmed["status"] == "succeeded"
+    assert confirmed["result"] == {"receipt": "ticket-8"}
+
+    failed = store.try_fail_task_with_attempt(
+        task_id, old_id, {"message": "failure in a later step"}
+    )
+    assert failed is not None and failed["status"] == "failed"
+    after_failure = read_state(store)
+    assert prepare_external(store, task_id, old_id) is None
+    assert read_state(store) == after_failure
+
+    policy = dict(retryable_error=True, outcome_unknown=False, replay_safe=True)
+    scheduled = store.try_schedule_task_retry(task_id, old_id, delay_seconds=0, **policy)
+    assert isinstance(scheduled, dict) and scheduled["next_retry_at"] is not None
+    _, new_attempt = assert_claimed(store.try_retry_task_with_attempt(task_id, old_id, **policy))
+    assert new_attempt["attempt_no"] == 2 and new_attempt["attempt_id"] != old_id
+    before = read_state(store)
+
+    assert prepare_external(store, task_id, old_id) is None
+    assert prepare_external(store, task_id, old_id, call_index=1) is None
+    assert prepare_external(store, task_id, new_attempt["attempt_id"]) == (confirmed, False)
+    assert read_state(store) == before
+
+
+def test_prepare_external_concurrent_callers_receive_only_one_grant(store):
+    task_id, attempt_id = make_running_task(store)
+    before = read_state(store)
+    barrier = Barrier(2)
+
+    def contender():
+        independent = TaskStore(store.dsn)
+        barrier.wait(timeout=10)
+        return prepare_external(independent, task_id, attempt_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(contender) for _ in range(2)]
+        results = [future.result(timeout=20) for future in futures]
+
+    (row_a, flag_a), (row_b, flag_b) = results
+    assert sorted([flag_a, flag_b]) == [False, True]
+    assert row_a == row_b and row_a["status"] == "started"
+    assert read_state(store) == {**before, "calls": [row_a]}
+
+
+@pytest.mark.parametrize("fault", ["empty-returning", "commit-error"])
+def test_prepare_external_insert_failure_cannot_return_a_send_grant(store, fault):
+    task_id, attempt_id = make_running_task(store)
+    before = read_state(store)
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        if fault == "empty-returning":
+            conn.execute("""
+                CREATE FUNCTION test_skip_external_prepare() RETURNS trigger
+                LANGUAGE plpgsql AS $body$ BEGIN RETURN NULL; END; $body$
+            """)
+            conn.execute("""
+                CREATE TRIGGER test_skip_external_prepare BEFORE INSERT ON tool_calls
+                FOR EACH ROW EXECUTE FUNCTION test_skip_external_prepare()
+            """)
+        else:
+            conn.execute("""
+                CREATE FUNCTION test_fail_external_prepare_commit() RETURNS trigger
+                LANGUAGE plpgsql AS $body$
+                BEGIN
+                    RAISE EXCEPTION 'injected external prepare commit error';
+                    RETURN NEW;
+                END;
+                $body$
+            """)
+            conn.execute("""
+                CREATE CONSTRAINT TRIGGER test_fail_external_prepare_commit
+                AFTER INSERT ON tool_calls DEFERRABLE INITIALLY DEFERRED
+                FOR EACH ROW EXECUTE FUNCTION test_fail_external_prepare_commit()
+            """)
+
+    if fault == "empty-returning":
+        with pytest.raises(RuntimeError, match="工具调用冲突后未找到账本"):
+            prepare_external(store, task_id, attempt_id)
+    else:
+        with pytest.raises(psycopg.errors.RaiseException, match="injected external prepare commit error"):
+            prepare_external(store, task_id, attempt_id)
+
+    assert read_state(store) == before
+
+
+def make_started_external_call(store):
+    task_id, attempt_id = make_running_task(store)
+    row, inserted = prepare_external(store, task_id, attempt_id)
+    assert inserted is True and row["status"] == "started"
+    return task_id, row
+
+
+def write_ticket_outcome(store, task_id, call_id, receipt):
+    if receipt is None:
+        return store.try_mark_external_tool_call_unknown(task_id, call_id)
+    return store.try_succeed_external_tool_call(task_id, call_id, result=receipt)
+
+
+def test_external_writeback_first_receipt_survives_repeat_and_late_unknown(store):
+    task_id, started = make_started_external_call(store)
+    call_id = started["tool_call_id"]
+    before = read_state(store)
+    receipt = {"ticket_id": "T-7"}
+
+    row = store.try_succeed_external_tool_call(task_id, call_id, result=receipt)
+    assert row["completed_at"] is not None
+    assert row == {
+        **started, "status": "succeeded", "result": receipt,
+        "completed_at": row["completed_at"],
+    }
+    committed = read_state(store)
+    assert committed == {**before, "calls": [row]}
+
+    # 已提交，调用方在另一连接重试本地写回。较晚的写入不能改变首份回执。
+    reopened = TaskStore(store.dsn)
+    assert reopened.try_succeed_external_tool_call(task_id, call_id, result=receipt) == row
+    assert reopened.try_succeed_external_tool_call(
+        task_id, call_id, result={"ticket_id": "late-receipt"}
+    ) == row
+    assert reopened.try_mark_external_tool_call_unknown(task_id, call_id) == row
+    assert read_state(store) == committed
+
+
+def test_external_writeback_unknown_is_preserved_for_reconciliation(store):
+    task_id, started = make_started_external_call(store)
+    call_id = started["tool_call_id"]
+    before = read_state(store)
+
+    row = store.try_mark_external_tool_call_unknown(task_id, call_id)
+    assert row == {**started, "status": "unknown"}
+    committed = read_state(store)
+    assert committed == {**before, "calls": [row]}
+
+    assert store.try_mark_external_tool_call_unknown(task_id, call_id) == row
+    assert store.try_succeed_external_tool_call(
+        task_id, call_id, result={"ticket_id": "T-7"}
+    ) == row
+    assert read_state(store) == committed
+
+
+@pytest.mark.parametrize("bad_key", ["task-id", "tool-call-id"])
+@pytest.mark.parametrize("receipt", [{"ticket_id": "T-7"}, None], ids=["success", "unknown"])
+def test_external_writeback_missing_registered_pair_raises(store, bad_key, receipt):
+    task_id, started = make_started_external_call(store)
+    call_id = started["tool_call_id"]
+    if bad_key == "task-id":
+        task_id = create_task(store)["task_id"]
+    else:
+        call_id = uuid4()
+    before = read_state(store)
+
+    with pytest.raises(RuntimeError, match="已登记的工具调用缺少账本"):
+        write_ticket_outcome(store, task_id, call_id, receipt)
+    assert read_state(store) == before
+
+
+def test_external_writeback_concurrent_outcomes_return_the_committed_winner(store):
+    task_id, started = make_started_external_call(store)
+    before = read_state(store)
+    barrier = Barrier(2)
+    receipt = {"ticket_id": "T-7"}
+
+    def contender(value):
+        independent = TaskStore(store.dsn)
+        barrier.wait(timeout=10)
+        return write_ticket_outcome(independent, task_id, started["tool_call_id"], value)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        success_future = pool.submit(contender, receipt)
+        unknown_future = pool.submit(contender, None)
+        success_view = success_future.result(timeout=20)
+        unknown_view = unknown_future.result(timeout=20)
+
+    after = read_state(store)
+    assert len(after["calls"]) == 1
+    winner = after["calls"][0]
+    assert success_view == unknown_view == winner
+    assert winner["status"] in ("succeeded", "unknown")
+    if winner["status"] == "succeeded":
+        assert winner["result"] == receipt
+        assert winner["completed_at"] is not None
+    else:
+        assert winner["result"] is None and winner["completed_at"] is None
+    assert after == {**before, "calls": [winner]}
+
+
+@pytest.mark.parametrize("receipt", [{"ticket_id": "T-7"}, None], ids=["success", "unknown"])
+def test_external_writeback_commit_error_rolls_back_then_local_update_can_retry(store, receipt):
+    task_id, started = make_started_external_call(store)
+    call_id = started["tool_call_id"]
+    before = read_state(store)
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute("""
+            CREATE FUNCTION test_reject_external_writeback_commit() RETURNS trigger
+            LANGUAGE plpgsql AS $body$
+            BEGIN
+                RAISE EXCEPTION 'injected external writeback commit error';
+                RETURN NEW;
+            END;
+            $body$
+        """)
+        conn.execute("""
+            CREATE CONSTRAINT TRIGGER test_reject_external_writeback_commit
+            AFTER UPDATE ON tool_calls DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION test_reject_external_writeback_commit()
+        """)
+
+    with pytest.raises(psycopg.errors.RaiseException, match="injected external writeback commit error"):
+        write_ticket_outcome(store, task_id, call_id, receipt)
+    assert read_state(store) == before
+
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute("DROP TRIGGER test_reject_external_writeback_commit ON tool_calls")
+        conn.execute("DROP FUNCTION test_reject_external_writeback_commit()")
+
+    row = write_ticket_outcome(TaskStore(store.dsn), task_id, call_id, receipt)
+    if receipt is None:
+        assert row == {**started, "status": "unknown"}
+    else:
+        assert row["completed_at"] is not None
+        assert row == {
+            **started, "status": "succeeded", "result": receipt,
+            "completed_at": row["completed_at"],
+        }
+    assert read_state(store) == {**before, "calls": [row]}
+
+
+def test_external_writeback_reports_actual_started_row_if_update_is_skipped(store):
+    task_id, started = make_started_external_call(store)
+    call_id = started["tool_call_id"]
+    before = read_state(store)
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute("""
+            CREATE FUNCTION test_skip_external_writeback() RETURNS trigger
+            LANGUAGE plpgsql AS $body$ BEGIN RETURN NULL; END; $body$
+        """)
+        conn.execute("""
+            CREATE TRIGGER test_skip_external_writeback BEFORE UPDATE ON tool_calls
+            FOR EACH ROW EXECUTE FUNCTION test_skip_external_writeback()
+        """)
+
+    assert store.try_succeed_external_tool_call(task_id, call_id, result={"ticket_id": "T-7"}) == started
+    assert store.try_mark_external_tool_call_unknown(task_id, call_id) == started
     assert read_state(store) == before

@@ -26,6 +26,183 @@ class TaskStore:
             connect_timeout=5,
         )
 
+    def try_prepare_external_tool_call(
+        self,
+        task_id: UUID,
+        expected_attempt_id: UUID,
+        *,
+        step_index: int,
+        call_index: int,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool] | None:
+        """登记外部调用意图。布尔值表示本次是否成功提交了新记录。"""
+        for name, value in (
+            ("step_index", step_index),
+            ("call_index", call_index),
+        ):
+            if type(value) is not int:
+                raise TypeError(f"{name} 必须是整数")
+            if value < 0:
+                raise ValueError(f"{name} 不能小于 0")
+
+        if not isinstance(tool_name, str):
+            raise TypeError("tool_name 必须是字符串")
+        if not tool_name.strip():
+            raise ValueError("tool_name 不能为空")
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments 必须是字典")
+
+        tool_call_id = uuid5(task_id, f"step:{step_index}:call:{call_index}")
+        input_fingerprint = build_request_fingerprint(tool_name, arguments)
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM tasks WHERE task_id = %s FOR UPDATE",
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+                if task_row is None or task_row["status"] != "running":
+                    return None
+
+                cur.execute(
+                    """
+                    SELECT attempt_id, status
+                    FROM task_attempts
+                    WHERE task_id = %s
+                    ORDER BY attempt_no DESC
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                latest_attempt = cur.fetchone()
+                if latest_attempt is None:
+                    raise RuntimeError("running Task 缺少 Attempt")
+                if latest_attempt["status"] != "running":
+                    raise RuntimeError("最新 Attempt 不是 running")
+                if latest_attempt["attempt_id"] != expected_attempt_id:
+                    return None
+
+                cur.execute(
+                    """
+                    INSERT INTO tool_calls (
+                        tool_call_id, task_id, step_index, call_index,
+                        tool_name, input_fingerprint, status, result, completed_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'started', NULL, NULL)
+                    ON CONFLICT (task_id, step_index, call_index) DO NOTHING
+                    RETURNING *
+                    """,
+                    (
+                        tool_call_id, task_id, step_index, call_index,
+                        tool_name, input_fingerprint,
+                    ),
+                )
+                call_row = cur.fetchone()
+                inserted_here = call_row is not None
+
+                if not inserted_here:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM tool_calls
+                        WHERE task_id = %s
+                          AND step_index = %s
+                          AND call_index = %s
+                        """,
+                        (task_id, step_index, call_index),
+                    )
+                    call_row = cur.fetchone()
+                    if call_row is None:
+                        raise RuntimeError("工具调用冲突后未找到账本")
+                    if (
+                        call_row["tool_name"] != tool_name
+                        or call_row["input_fingerprint"] != input_fingerprint
+                    ):
+                        raise ValueError("同一工具调用的名称或参数发生变化")
+
+        return call_row, inserted_here
+
+    def try_succeed_external_tool_call(
+        self,
+        task_id: UUID,
+        tool_call_id: UUID,
+        *,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """保存已确认的外部回执，提交成功后返回该调用的实际账本行。"""
+        if not isinstance(result, dict):
+            raise TypeError("result 必须是字典")
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE tool_calls
+                    SET status = 'succeeded',
+                        result = %s,
+                        completed_at = CURRENT_TIMESTAMP
+                    WHERE task_id = %s
+                      AND tool_call_id = %s
+                      AND status = 'started'
+                    RETURNING *
+                    """,
+                    (Jsonb(result), task_id, tool_call_id),
+                )
+                call_row = self._fetch_external_call_after_update(
+                    cur, task_id, tool_call_id
+                )
+
+        return call_row
+
+    def try_mark_external_tool_call_unknown(
+        self,
+        task_id: UUID,
+        tool_call_id: UUID,
+    ) -> dict[str, Any]:
+        """发送方确认结果不明，或恢复方已确认原执行者退出且结果不可核对时调用。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE tool_calls
+                    SET status = 'unknown'
+                    WHERE task_id = %s
+                      AND tool_call_id = %s
+                      AND status = 'started'
+                    RETURNING *
+                    """,
+                    (task_id, tool_call_id),
+                )
+                call_row = self._fetch_external_call_after_update(
+                    cur, task_id, tool_call_id
+                )
+
+        return call_row
+
+    @staticmethod
+    def _fetch_external_call_after_update(
+        cur, task_id: UUID, tool_call_id: UUID,
+    ) -> dict[str, Any]:
+        """读取 UPDATE RETURNING，零行时回读同一调用的现状。"""
+        call_row = cur.fetchone()
+        if call_row is None:
+            cur.execute(
+                """
+                SELECT *
+                FROM tool_calls
+                WHERE task_id = %s
+                  AND tool_call_id = %s
+                """,
+                (task_id, tool_call_id),
+            )
+            call_row = cur.fetchone()
+            if call_row is None:
+                raise RuntimeError("已登记的工具调用缺少账本")
+
+        return call_row
+
     def create_task(
         self,
         task_type: str,

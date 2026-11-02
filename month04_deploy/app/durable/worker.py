@@ -1,5 +1,7 @@
 import argparse
 import os
+from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 from uuid import UUID
 from datetime import datetime
@@ -61,6 +63,89 @@ def restore_progress(
         state = completed_steps[-1]["result"]
 
     return next_step, state
+
+
+class ExternalToolReceiptPending(RuntimeError):
+    """外部成功回执可用，本地账本写回仍需确认。"""
+
+    def __init__(self, task_id: UUID, tool_call_id: UUID, receipt: dict[str, Any]):
+        super().__init__(f"工具调用 {tool_call_id} 已取得成功回执，本地写回需要核对")
+        self.task_id = task_id
+        self.tool_call_id = tool_call_id
+        self.receipt = deepcopy(receipt)
+
+
+def _external_tool_terminal_result(call_row: dict[str, Any]) -> dict[str, Any] | RetryDecision:
+    status = call_row["status"]
+    if status == "succeeded":
+        return call_row["result"]
+    if status == "unknown":
+        return RetryDecision.RECONCILE
+    raise RuntimeError(f"工具调用 {call_row['tool_call_id']} 写回后状态仍为 {status}")
+
+
+def run_external_tool_once(
+    store: TaskStore,
+    task_id: UUID,
+    expected_attempt_id: UUID,
+    *,
+    step_index: int,
+    call_index: int,
+    tool_name: str,
+    arguments: dict[str, Any],
+    send: Callable[[UUID, dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any] | RetryDecision | None:
+    """执行已领取 Task 的一个工具步骤。适配器发送一次请求，返回成功回执或抛出 TimeoutError。"""
+    if not callable(send):
+        raise TypeError("send 必须是可调用对象")
+
+    # 准备阶段和发送阶段使用同一份参数。
+    payload = deepcopy(arguments)
+    prepared = store.try_prepare_external_tool_call(
+        task_id,
+        expected_attempt_id,
+        step_index=step_index,
+        call_index=call_index,
+        tool_name=tool_name,
+        arguments=payload,
+    )
+    if prepared is None:
+        return None
+
+    call_row, inserted_here = prepared
+    if not inserted_here and call_row["status"] == "started":
+        return None
+
+    if inserted_here:
+        tool_call_id = call_row["tool_call_id"]
+        try:
+            receipt = send(tool_call_id, payload)
+        except TimeoutError:
+            call_row = store.try_mark_external_tool_call_unknown(task_id, tool_call_id)
+        else:
+            if not isinstance(receipt, dict):
+                raise TypeError("send 必须返回回执字典")
+            # 回执已知。调用者可用这个异常携带的回执单独重试本地写回。
+            try:
+                call_row = store.try_succeed_external_tool_call(
+                    task_id, tool_call_id, result=receipt
+                )
+            except Exception as exc:
+                raise ExternalToolReceiptPending(task_id, tool_call_id, receipt) from exc
+            if call_row["status"] == "started":
+                raise ExternalToolReceiptPending(task_id, tool_call_id, receipt)
+
+    return _external_tool_terminal_result(call_row)
+
+
+def reconcile_external_tool_call_after_sender_exit(
+    store: TaskStore,
+    task_id: UUID,
+    tool_call_id: UUID,
+) -> dict[str, Any] | RetryDecision:
+    """调用者已确认持有该调用发送资格的进程退出，且无法向服务方核对结果。"""
+    call_row = store.try_mark_external_tool_call_unknown(task_id, tool_call_id)
+    return _external_tool_terminal_result(call_row)
 
 
 def run_task_once(
