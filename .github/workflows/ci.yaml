@@ -187,9 +187,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat \
-            month04_deploy/migrations/001_create_tasks.sql \
-            month04_deploy/migrations/002_create_task_steps.sql |
+          export LC_ALL=C
+          for migration in month04_deploy/migrations/[0-9][0-9][0-9]_*.sql; do
+            cat -- "$migration"
+            printf '\n'
+          done |
             docker exec -i "${{ job.services.postgres.id }}" \
               psql -X \
                 -U agent \
@@ -198,7 +200,7 @@ jobs:
                 --single-transaction \
                 --file=-
 
-      - name: Run durable recovery integration tests
+      - name: Run Month04 tests and v0.1 acceptance demo
         run: |
           set -euo pipefail
           mkdir -p test-reports
@@ -206,11 +208,12 @@ jobs:
           python -m pytest \
             -p pytest_asyncio.plugin \
             -q -s \
-            month04_deploy/tests/test_durable_worker_integration.py \
+            month04_deploy/tests \
+            month04_deploy/demos/v01_acceptance.py \
             --junitxml=test-reports/month04-db.xml \
             2>&1 | tee test-reports/month04-db.log
 
-      - name: Verify integration tests actually ran
+      - name: Verify Month04 acceptance cases ran
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -220,8 +223,20 @@ jobs:
           root = ET.parse(report).getroot()
           cases = list(root.iter("testcase"))
 
-          if len(cases) < 3:
-              raise SystemExit("数据库集成测试少于 3 项")
+          if len(cases) < 6:
+              raise SystemExit("数据库集成测试少于 6 项")
+
+          required = {
+              "test_resume_after_committed_step[0]",
+              "test_resume_after_committed_step[1]",
+              "test_resume_after_committed_step[2]",
+              "test_first_call_commits_and_repeated_call_preserves_original_record[new-counter]",
+              "test_worker_external_timeout_after_ticket_creation_reconciles_twice_with_one_send",
+              "test_v01_acceptance",
+          }
+          missing = required - {case.get("name") for case in cases}
+          if missing:
+              raise SystemExit(f"缺少验收用例 {sorted(missing)}")
 
           rejected = [
               case.get("name", "<unknown>")
@@ -234,11 +249,11 @@ jobs:
 
           if rejected:
               raise SystemExit(
-                  f"数据库集成测试存在跳过或失败：{rejected}"
+                  f"Month04 验收存在跳过或失败 {rejected}"
               )
 
           print(
-              f"Integration gate: {len(cases)} passed, "
+              f"Month04 gate: {len(cases)} passed, "
               "0 skipped, 0 failed"
           )
           PY
