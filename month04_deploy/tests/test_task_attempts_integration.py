@@ -48,6 +48,7 @@ def store():
         migrations_dir / "004_create_task_attempts.sql",
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
+        migrations_dir / "007_add_task_next_retry_at.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"

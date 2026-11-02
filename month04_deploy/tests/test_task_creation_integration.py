@@ -96,8 +96,21 @@ def database_before_max_attempts(database_before_deadline):
 @pytest.fixture
 def store(database_before_max_attempts):
     dsn, max_attempts_migration = database_before_max_attempts
+
+    next_retry_migration = max_attempts_migration.with_name(
+        "007_add_task_next_retry_at.sql"
+    )
+    assert next_retry_migration.is_file(), (
+        f"缺少迁移文件：{next_retry_migration}"
+    )
+
     with psycopg.connect(dsn, connect_timeout=5) as conn:
-        conn.execute(max_attempts_migration.read_text(encoding="utf-8"), prepare=False)
+        for migration in (max_attempts_migration, next_retry_migration):
+            conn.execute(
+                migration.read_text(encoding="utf-8"),
+                prepare=False,
+            )
+
     return TaskStore(dsn)
 
 

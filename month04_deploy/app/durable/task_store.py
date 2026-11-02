@@ -1,6 +1,8 @@
+import hashlib
+import json
 from typing import Any
-from uuid import UUID, uuid4
-from datetime import datetime
+from uuid import UUID, uuid4, uuid5
+from datetime import datetime, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
@@ -636,14 +638,22 @@ class TaskStore:
                 if decision is not RetryDecision.RETRY:
                     return decision
 
+                next_retry_at = task_row["next_retry_at"]
+
+                if next_retry_at is None or checked_at < next_retry_at:
+                    return None
+
                 task_sql = """
                     UPDATE tasks AS t
                     SET status = 'running',
                         result = NULL,
                         error = NULL,
+                        next_retry_at = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE t.task_id = %s
-                    AND t.status = 'failed'
+                      AND t.status = 'failed'
+                      AND t.next_retry_at IS NOT NULL
+                      AND t.next_retry_at <= %s
                     RETURNING t.*
                 """
                 new_attempt_no = latest_attempt["attempt_no"] + 1
@@ -665,7 +675,7 @@ class TaskStore:
                 # raise NotImplementedError("完成 Task 重试更新")
                 cur.execute(
                     task_sql,
-                    (task_id,)
+                    (task_id, checked_at),
                 )
                 task_row = cur.fetchone()
                 if task_row is None:
@@ -689,3 +699,310 @@ class TaskStore:
 
         # 放在两个 with 外面：提交成功后返回领取结果。
         return task_row, attempt_row
+
+    def try_schedule_task_retry(
+        self,
+        task_id: UUID,
+        expected_attempt_id: UUID,
+        *,
+        retryable_error: bool,
+        outcome_unknown: bool,
+        replay_safe: bool,
+        delay_seconds: int = 5,
+    ) -> dict[str, Any] | RetryDecision | None:
+        """为最新失败的 Attempt 安排重试；当前练习尚未完成。"""
+
+        if type(delay_seconds) is not int:
+            raise TypeError("delay_seconds 必须是整数")
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds 不能小于 0")
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM tasks
+                    WHERE task_id = %s
+                    FOR UPDATE
+                    """,
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+
+                if task_row is None or task_row["status"] != "failed":
+                    return None
+
+                # TODO 1：
+                # 使用同一个 cur 查询这个 Task 的最新 Attempt。
+                # 按 attempt_no 降序，LIMIT 1。
+                # 查询时不要先筛选 status。
+                # fetchone() 的结果赋给 latest_attempt。
+                cur.execute(
+                    """
+                    SELECT *
+                    From task_attempts
+                    WHERE task_id = %s
+                    ORDER BY attempt_no DESC
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                latest_attempt = cur.fetchone()
+
+                # TODO 2：
+                # latest_attempt 为 None：
+                #     抛出 RuntimeError("failed Task 缺少 Attempt")
+                #
+                # latest_attempt["status"] 不是 "failed"：
+                #     抛出 RuntimeError("最新 Attempt 不是 failed")
+                #
+                # latest_attempt["attempt_id"] 与 expected_attempt_id 不同：
+                #     返回 None。
+                if latest_attempt is None:
+                    raise RuntimeError("failed Task 缺少 Attempt")
+                if latest_attempt["status"] != "failed":
+                    raise RuntimeError("最新 Attempt 不是 failed")
+                if latest_attempt["attempt_id"] != expected_attempt_id:
+                    return None
+
+                cur.execute("SELECT clock_timestamp() AS checked_at")
+                checked_at = cur.fetchone()["checked_at"]
+
+                retry_deadline_at = task_row["retry_deadline_at"]
+
+                # TODO 1：
+                # 截止时间为 None：time_budget_remaining = False。
+                # 否则：比较 checked_at < retry_deadline_at。
+                if retry_deadline_at is None:
+                    time_budget_remaining = False
+                else:
+                    time_budget_remaining = checked_at < retry_deadline_at
+
+                # TODO 2：
+                # 调用 decide_retry()，结果赋给 decision。
+                # 三个布尔参数使用方法入参。
+                # attempts_used 使用 latest_attempt["attempt_no"]。
+                # max_attempts 使用 task_row["max_attempts"]。
+                # time_budget_remaining 使用上面的计算结果。
+                decision = decide_retry(
+                    retryable_error=retryable_error,
+                    outcome_unknown=outcome_unknown,
+                    replay_safe=replay_safe,
+                    attempts_used=latest_attempt["attempt_no"],
+                    max_attempts=task_row["max_attempts"],
+                    time_budget_remaining=time_budget_remaining,
+                )
+
+                # TODO 3：
+                # 如果 decision 不是 RetryDecision.RETRY，
+                # 返回 decision。
+                if decision != RetryDecision.RETRY:
+                    return decision
+
+                # 此处 decision 已经是 RetryDecision.RETRY。
+
+                # TODO 1：
+                # 如果 task_row["next_retry_at"] 不是 None，
+                # 直接返回 task_row，保留原计划。
+                #
+                # 提示：使用 is not None 判断。
+                if task_row["next_retry_at"] is not None:
+                    return task_row
+
+
+                # TODO 2：
+                # 用 checked_at 加上 timedelta(seconds=delay_seconds)，
+                # 结果赋给 next_retry_at。
+                next_retry_at = checked_at + timedelta(seconds=delay_seconds)
+
+                # TODO 3：
+                # 如果 next_retry_at >= retry_deadline_at，
+                # 返回 RetryDecision.STOP。
+                #
+                # 刚好到达截止时间，也不能安排这次重试。
+                if next_retry_at >= retry_deadline_at:
+                    return RetryDecision.STOP
+
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET next_retry_at = %s
+                    WHERE task_id = %s
+                        AND status = 'failed'
+                        AND next_retry_at IS NULL
+                    RETURNING *
+                    """,
+                    (next_retry_at, task_id),
+                )
+                scheduled_task = cur.fetchone()
+
+                if scheduled_task is None:
+                    raise RuntimeError("安排重试时未更新到预期 Task")
+
+        # 与最外层 with 对齐，事务提交成功后返回。
+        return scheduled_task
+
+    def try_increment_counter_once(
+        self,
+        task_id: UUID,
+        expected_attempt_id: UUID,
+        *,
+        step_index: int,
+        call_index: int,
+        counter_name: str,
+    ) -> dict[str, Any] | None:
+        """当前 Attempt 执行计数器加一；同一逻辑调用返回已保存结果。"""
+
+        for name, value in (
+            ("step_index", step_index),
+            ("call_index", call_index),
+        ):
+            if type(value) is not int:
+                raise TypeError(f"{name} 必须是整数")
+            if value < 0:
+                raise ValueError(f"{name} 不能小于 0")
+
+        if not isinstance(counter_name, str):
+            raise TypeError("counter_name 必须是字符串")
+        if not counter_name.strip():
+            raise ValueError("counter_name 不能为空")
+
+        tool_name = "demo.counter_increment_v1"
+
+        # 相同 Task、步骤位置和调用位置，生成相同的 UUID。
+        # expected_attempt_id 不参与生成。
+        tool_call_id = uuid5(
+            task_id,
+            f"step:{step_index}:call:{call_index}",
+        )
+
+        fingerprint_payload = {
+            "tool_name": tool_name,
+            "counter_name": counter_name,
+            "increment": 1,
+        }
+        input_fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # 先锁 Task，串行处理同一个 Task 的工具调用。
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM tasks
+                    WHERE task_id = %s
+                    FOR UPDATE
+                    """,
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+
+                if task_row is None or task_row["status"] != "running":
+                    return None
+
+                # 拿到锁之后，校验当前运行中的 Attempt。
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM task_attempts
+                    WHERE task_id = %s
+                    ORDER BY attempt_no DESC
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                latest_attempt = cur.fetchone()
+
+                if latest_attempt is None:
+                    raise RuntimeError("running Task 缺少 Attempt")
+                if latest_attempt["status"] != "running":
+                    raise RuntimeError("最新 Attempt 不是 running")
+                if latest_attempt["attempt_id"] != expected_attempt_id:
+                    return None
+
+                # 从这里开始，是你已经完成的核心逻辑。
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM tool_calls
+                    WHERE task_id = %s
+                      AND step_index = %s
+                      AND call_index = %s
+                    """,
+                    (task_id, step_index, call_index),
+                )
+                existing_call = cur.fetchone()
+
+                if existing_call is not None:
+                    if (
+                        existing_call["tool_name"] != tool_name
+                        or existing_call["input_fingerprint"]
+                        != input_fingerprint
+                    ):
+                        raise ValueError(
+                            "同一工具调用的名称或参数发生变化"
+                        )
+
+                    return existing_call["result"]
+
+                cur.execute(
+                    """
+                    INSERT INTO demo_counters (counter_name, value)
+                    VALUES (%s, 1)
+                    ON CONFLICT (counter_name)
+                    DO UPDATE SET value = demo_counters.value + 1
+                    RETURNING value
+                    """,
+                    (counter_name,),
+                )
+                counter_row = cur.fetchone()
+
+                if counter_row is None:
+                    raise RuntimeError("计数器更新后没有返回记录")
+
+                result = {
+                    "counter_name": counter_name,
+                    "value": counter_row["value"],
+                }
+
+                cur.execute(
+                    """
+                    INSERT INTO tool_calls (
+                        tool_call_id,
+                        task_id,
+                        step_index,
+                        call_index,
+                        tool_name,
+                        input_fingerprint,
+                        result
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING result
+                    """,
+                    (
+                        tool_call_id,
+                        task_id,
+                        step_index,
+                        call_index,
+                        tool_name,
+                        input_fingerprint,
+                        Jsonb(result),
+                    ),
+                )
+                saved_call = cur.fetchone()
+
+                if saved_call is None:
+                    raise RuntimeError("写入工具账本后没有返回记录")
+
+                result = saved_call["result"]
+
+        # 两个 with 退出、事务提交成功后，返回新执行的结果。
+        return result

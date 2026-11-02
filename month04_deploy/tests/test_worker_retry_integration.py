@@ -74,6 +74,7 @@ def store():
         migrations_dir / "004_create_task_attempts.sql",
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
+        migrations_dir / "007_add_task_next_retry_at.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -175,6 +176,17 @@ def create_task_for_retry(
     return created
 
 
+def schedule_retry_now(store: TaskStore, task_id: UUID, expected_attempt_id: UUID):
+    """调用方先提交计划；Worker 单独负责尝试领取和执行。"""
+    scheduled = store.try_schedule_task_retry(
+        task_id, expected_attempt_id, delay_seconds=0, **POLICY
+    )
+    assert isinstance(scheduled, dict), f"预期已提交的重试计划，实际为 {scheduled!r}"
+    assert scheduled["status"] == "failed"
+    assert scheduled["next_retry_at"] is not None
+    return scheduled
+
+
 def retry_arguments(**overrides):
     return {**POLICY, **overrides}
 
@@ -224,6 +236,7 @@ def assert_succeeded_retry(store, task_id, finished, before):
     assert task["status"] == "succeeded"
     assert task["result"] == {"answer": f"echo:{TEXT}"}
     assert task["error"] is None
+    assert task["next_retry_at"] is None
     assert task["payload"] == before[0]["payload"]
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
     assert task["max_attempts"] == before[0]["max_attempts"]
@@ -250,6 +263,7 @@ def assert_running_retry(store, task_id, before):
         "status": "running",
         "result": None,
         "error": None,
+        "next_retry_at": None,
         "updated_at": task["updated_at"],
     }
     assert len(attempts) == 2
@@ -260,6 +274,34 @@ def assert_running_retry(store, task_id, before):
     assert attempts[1]["error"] is None
     assert attempts[1]["finished_at"] is None
     return task, attempts, steps
+
+
+@pytest.mark.parametrize("plan_kind", ["no-plan", "not-due"])
+def test_worker_waits_for_due_plan_without_steps_or_changes(store, monkeypatch, plan_kind):
+    task_id, attempt_id = make_failed_task(store)
+    if plan_kind == "not-due":
+        scheduled = store.try_schedule_task_retry(
+            task_id, attempt_id, delay_seconds=60, **POLICY
+        )
+        assert isinstance(scheduled, dict)
+    before = read_state(store, task_id)
+    if plan_kind == "no-plan":
+        assert before[0]["next_retry_at"] is None
+    else:
+        assert before[0] == scheduled
+    calls = observe_steps(monkeypatch)
+
+    for _ in range(2):
+        assert retry(store, task_id, attempt_id) is None
+        assert calls == []
+        assert read_state(store, task_id) == before
+
+    if plan_kind == "not-due":
+        with psycopg.connect(store.dsn, row_factory=dict_row, connect_timeout=5) as conn:
+            now = conn.execute("SELECT clock_timestamp() AS checked_at").fetchone()["checked_at"]
+        assert now < scheduled["next_retry_at"], (
+            "此用例必须在计划时间到达前完成，才能验证 Worker 未到期不执行"
+        )
 
 
 def test_failed_worker_retries_from_saved_input_with_new_attempt(store, monkeypatch):
@@ -278,6 +320,8 @@ def test_failed_worker_retries_from_saved_input_with_new_attempt(store, monkeypa
     assert [index for index, _ in calls] == [0, 1]
     calls.clear()
 
+    schedule_retry_now(store, task_id, before[1][0]["attempt_id"])
+    before = read_state(store, task_id)
     finished = retry(store, task_id, before[1][0]["attempt_id"])
 
     assert calls == [(1, before[2][0]["result"]), (2, {"text": f"echo:{TEXT}"})]
@@ -287,6 +331,7 @@ def test_failed_worker_retries_from_saved_input_with_new_attempt(store, monkeypa
 @pytest.mark.parametrize("saved_count", [0, 3], ids=["no-checkpoint", "all-steps-saved"])
 def test_retry_handles_checkpoint_boundary(store, monkeypatch, saved_count):
     task_id, old_attempt_id = make_failed_task(store, saved_count)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     calls = observe_steps(monkeypatch)
 
@@ -393,12 +438,14 @@ def test_worker_stops_after_three_failures_without_executing_fourth_attempt(
     latest_attempt_id = before[1][-1]["attempt_id"]
 
     for expected_no in (2, 3):
+        schedule_retry_now(store, task_id, latest_attempt_id)
         before = read_state(store, task_id)
         with pytest.raises(ValueError, match=INJECTED_ERROR):
             retry(store, task_id, latest_attempt_id)
 
         task, attempts, steps = read_state(store, task_id)
         assert task["status"] == "failed"
+        assert task["next_retry_at"] is None
         assert task["max_attempts"] == 3
         assert task["retry_deadline_at"] == created["retry_deadline_at"]
         assert task["error"]["step_index"] == 1
@@ -428,6 +475,7 @@ def test_rejected_claim_returns_none_without_execution_or_changes(store, monkeyp
         task_id, old_attempt_id = uuid4(), uuid4()
     else:
         task_id, old_attempt_id = make_failed_task(store)
+        schedule_retry_now(store, task_id, old_attempt_id)
         if case == "stale-attempt":
             claimed = store.try_retry_task_with_attempt(
                 task_id, old_attempt_id, **retry_arguments()
@@ -438,6 +486,7 @@ def test_rejected_claim_returns_none_without_execution_or_changes(store, monkeyp
                 task_id, attempt["attempt_id"], {"message": "second fixture failure"}
             )
             assert failed is not None and failed["status"] == "failed"
+            schedule_retry_now(store, task_id, attempt["attempt_id"])
         else:
             finished = retry(store, task_id, old_attempt_id)
             assert finished is not None and finished["status"] == "succeeded"
@@ -451,6 +500,7 @@ def test_rejected_claim_returns_none_without_execution_or_changes(store, monkeyp
 
 def test_retry_step_failure_is_saved_to_new_attempt_and_propagates(store, monkeypatch):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     calls = observe_steps(monkeypatch, fail_once_at=1)
 
@@ -467,6 +517,7 @@ def test_retry_step_failure_is_saved_to_new_attempt_and_propagates(store, monkey
     assert calls == [(1, before[2][0]["result"])]
     assert task["status"] == "failed" and task["result"] is None
     assert task["error"] == expected_error
+    assert task["next_retry_at"] is None
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
     assert task["max_attempts"] == before[0]["max_attempts"]
     assert len(attempts) == 2 and attempts[0] == before[1][0]
@@ -479,6 +530,7 @@ def test_retry_step_failure_is_saved_to_new_attempt_and_propagates(store, monkey
 
 def test_step_save_sql_error_keeps_committed_retry_running(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute(
@@ -495,6 +547,7 @@ def test_step_save_sql_error_keeps_committed_retry_running(store):
 
 def test_rejected_completion_raises_and_does_not_report_retry_success(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute(
@@ -527,6 +580,7 @@ def test_rejected_completion_raises_and_does_not_report_retry_success(store):
 @pytest.mark.parametrize("crash_after_step", [-1, 3])
 def test_invalid_crash_argument_is_rejected_before_retry_claim(store, crash_after_step):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
 
     with pytest.raises(ValueError, match="crash_after_step"):
@@ -537,6 +591,7 @@ def test_invalid_crash_argument_is_rejected_before_retry_claim(store, crash_afte
 
 def test_crashed_retry_is_manually_resumed_with_same_new_attempt(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     project_root = Path(__file__).resolve().parents[2]
     program = """

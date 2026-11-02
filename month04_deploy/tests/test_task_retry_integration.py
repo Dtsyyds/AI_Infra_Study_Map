@@ -64,6 +64,7 @@ def store():
         migrations_dir / "004_create_task_attempts.sql",
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
+        migrations_dir / "007_add_task_next_retry_at.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -166,6 +167,22 @@ def deadline_for_creation(store: TaskStore, *, seconds: int = 600) -> datetime:
     return now + timedelta(seconds=seconds)
 
 
+def schedule_retry_now(store: TaskStore, task_id: UUID, expected_attempt_id: UUID):
+    """测试准备：先提交已到期计划，再单独调用领取接口。"""
+    scheduled = store.try_schedule_task_retry(
+        task_id,
+        expected_attempt_id,
+        retryable_error=True,
+        outcome_unknown=False,
+        replay_safe=True,
+        delay_seconds=0,
+    )
+    assert isinstance(scheduled, dict), f"预期已提交的重试计划，实际为 {scheduled!r}"
+    assert scheduled["status"] == "failed"
+    assert scheduled["next_retry_at"] is not None
+    return scheduled
+
+
 def retry(store: TaskStore, task_id: UUID, expected_attempt_id: UUID, **overrides):
     policy = {
         "retryable_error": True,
@@ -179,6 +196,7 @@ def retry(store: TaskStore, task_id: UUID, expected_attempt_id: UUID, **override
 @pytest.mark.parametrize("outcome_unknown", [False, True], ids=["known", "unknown-safe"])
 def test_retry_commits_task_and_new_attempt_preserves_history(store, outcome_unknown):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     # 人工设置旧 result，验证重试确实将其清空；不是正常 Worker 的输出。
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute(
@@ -196,6 +214,7 @@ def test_retry_commits_task_and_new_attempt_preserves_history(store, outcome_unk
         "status": "running",
         "result": None,
         "error": None,
+        "next_retry_at": None,
         "updated_at": task["updated_at"],
     }
     assert task["updated_at"] >= before_task["updated_at"]
@@ -214,6 +233,7 @@ def test_retry_commits_task_and_new_attempt_preserves_history(store, outcome_unk
 
 def test_retried_attempt_can_succeed_without_rewriting_old_failure(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     _, attempt = assert_claimed(retry(store, task_id, old_attempt_id))
 
@@ -292,6 +312,7 @@ def test_policy_rejection_preserves_all_rows(
 
 def test_repeated_request_is_rejected_after_retry_claim(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     assert_claimed(retry(store, task_id, old_attempt_id))
     before = read_state(store, task_id)
 
@@ -302,6 +323,7 @@ def test_repeated_request_is_rejected_after_retry_claim(store):
 
 def test_stale_request_cannot_retry_newer_failure(store):
     task_id, first_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, first_attempt_id)
     original_deadline = read_state(store, task_id)[0]["retry_deadline_at"]
     second_task, second_attempt = assert_claimed(retry(store, task_id, first_attempt_id))
     assert second_task["retry_deadline_at"] == original_deadline
@@ -309,12 +331,20 @@ def test_stale_request_cannot_retry_newer_failure(store):
     assert store.try_fail_task_with_attempt(
         task_id, second_attempt["attempt_id"], second_error
     ) is not None
+    schedule_retry_now(store, task_id, second_attempt["attempt_id"])
     before = read_state(store, task_id)
     assert before[0]["status"] == "failed"
     assert before[0]["retry_deadline_at"] == original_deadline
     assert [a["attempt_no"] for a in before[1]] == [1, 2]
 
     # Task 再次 failed，但针对第一次失败的旧请求不能领取第三次执行。
+    assert store.try_schedule_task_retry(
+        task_id, first_attempt_id,
+        retryable_error=True, outcome_unknown=False, replay_safe=True,
+        delay_seconds=60,
+    ) is None
+    assert read_state(store, task_id) == before
+
     assert retry(store, task_id, first_attempt_id) is None
     assert read_state(store, task_id) == before
 
@@ -331,7 +361,8 @@ def test_stale_request_cannot_retry_newer_failure(store):
 
 @pytest.mark.parametrize("kind", ["missing", "other-task"])
 def test_wrong_expected_attempt_returns_none(store, kind):
-    task_id, _ = make_failed_task(store)
+    task_id, own_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, own_attempt_id)
     other_task_id, other_attempt_id = make_failed_task(store)
     before = read_state(store, task_id)
     before_other = read_state(store, other_task_id)
@@ -382,6 +413,7 @@ def test_failed_task_without_attempt_raises_without_changes(store):
 
 def test_latest_attempt_must_not_be_selected_by_failed_status(store):
     task_id, first_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, first_attempt_id)
     # 故意构造不一致：Task failed，但最新 Attempt 已 succeeded。
     # 若查询先筛 failed，会错误地跳过第二条，退回到第一次失败。
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
@@ -402,6 +434,7 @@ def test_latest_attempt_must_not_be_selected_by_failed_status(store):
 
 def test_attempt_insert_sql_error_rolls_back_task_retry(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute("""
@@ -419,6 +452,7 @@ def test_attempt_insert_sql_error_rolls_back_task_retry(store):
 
 def test_attempt_insert_zero_rows_raises_and_rolls_back_task_retry(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute("""
@@ -431,6 +465,7 @@ def test_attempt_insert_zero_rows_raises_and_rolls_back_task_retry(store):
                       AND status = 'running'
                       AND result IS NULL
                       AND error IS NULL
+                      AND next_retry_at IS NULL
                 ) THEN
                     RAISE EXCEPTION 'test expected Task retry update first';
                 END IF;
@@ -455,6 +490,7 @@ def test_attempt_insert_zero_rows_raises_and_rolls_back_task_retry(store):
 
 def test_task_update_zero_rows_raises_without_creating_attempt(store):
     task_id, old_attempt_id = make_failed_task(store)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute("""
@@ -481,6 +517,7 @@ def test_task_update_zero_rows_raises_without_creating_attempt(store):
 def test_two_concurrent_retry_requests_only_one_claims(store):
     # 两个请求竞争仅剩的一次执行额度。
     task_id, old_attempt_id = make_failed_task(store, max_attempts=2)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     barrier = Barrier(2)
 
@@ -538,6 +575,7 @@ def test_persisted_limit_stops_fourth_attempt_after_three_failures(store):
     original_task, _, original_steps = read_state(store, task_id)
 
     for expected_no in (2, 3):
+        schedule_retry_now(store, task_id, latest_attempt_id)
         before = read_state(store, task_id)
         task, attempt = assert_claimed(retry(store, task_id, latest_attempt_id))
         assert task["max_attempts"] == 3
@@ -582,6 +620,7 @@ def test_aware_deadline_accepts_other_timezone_offsets(store, offset_hours):
     same_instant = deadline.astimezone(timezone(timedelta(hours=offset_hours)))
     assert same_instant == deadline
     task_id, old_attempt_id = make_failed_task(store, retry_deadline_at=same_instant)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     assert before[0]["retry_deadline_at"] == deadline
 
@@ -593,6 +632,68 @@ def test_aware_deadline_accepts_other_timezone_offsets(store, offset_hours):
     assert read_state(store, task_id) == (
         task, [*before[1], attempt], before[2]
     )
+
+
+def test_retry_requires_saved_plan(store):
+    task_id, attempt_id = make_failed_task(store)
+    before = read_state(store, task_id)
+    assert before[0]["next_retry_at"] is None
+
+    assert retry(store, task_id, attempt_id) is None
+
+    assert read_state(store, task_id) == before
+
+
+def test_retry_waits_until_saved_plan_is_due(store):
+    task_id, attempt_id = make_failed_task(store)
+    scheduled = store.try_schedule_task_retry(
+        task_id, attempt_id,
+        retryable_error=True, outcome_unknown=False, replay_safe=True,
+        delay_seconds=60,
+    )
+    assert isinstance(scheduled, dict)
+    before = read_state(store, task_id)
+    assert before[0] == scheduled
+
+    assert retry(store, task_id, attempt_id) is None
+
+    assert read_state(store, task_id) == before
+    with psycopg.connect(store.dsn, row_factory=dict_row, connect_timeout=5) as conn:
+        assert database_clock(conn) < scheduled["next_retry_at"], (
+            "此用例必须在计划时间到达前完成，才能验证未到期拒绝领取"
+        )
+
+
+def test_retry_consumes_plan_and_new_failure_gets_fresh_plan(store):
+    task_id, first_attempt_id = make_failed_task(store)
+    first_plan = schedule_retry_now(store, task_id, first_attempt_id)
+    running_task, second_attempt = assert_claimed(
+        retry(store, task_id, first_attempt_id)
+    )
+    assert running_task["status"] == "running"
+    assert running_task["next_retry_at"] is None
+    assert second_attempt["attempt_no"] == 2
+
+    failed = store.try_fail_task_with_attempt(
+        task_id, second_attempt["attempt_id"],
+        {"type": "TransientTestError", "message": "second failure needs a fresh plan"},
+    )
+    assert failed is not None and failed["status"] == "failed"
+    before = read_state(store, task_id)
+    assert before[0] == failed
+    assert before[0]["next_retry_at"] is None
+
+    second_plan = store.try_schedule_task_retry(
+        task_id, second_attempt["attempt_id"],
+        retryable_error=True, outcome_unknown=False, replay_safe=True,
+        delay_seconds=60,
+    )
+    assert isinstance(second_plan, dict)
+    assert second_plan["next_retry_at"] > first_plan["next_retry_at"]
+    assert second_plan == {
+        **before[0], "next_retry_at": second_plan["next_retry_at"]
+    }
+    assert read_state(store, task_id) == (second_plan, before[1], before[2])
 
 
 def database_clock(connection) -> datetime:
@@ -637,6 +738,7 @@ def test_retry_rechecks_actual_time_after_task_lock_wait(store, expires_while_wa
         store, seconds=8 if expires_while_waiting else 600
     )
     task_id, old_attempt_id = make_failed_task(store, retry_deadline_at=retry_deadline_at)
+    schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
     assert before[0]["retry_deadline_at"] == retry_deadline_at
     application_name = f"retry_deadline_wait_{uuid4().hex}"
@@ -702,3 +804,136 @@ def test_retry_rechecks_actual_time_after_task_lock_wait(store, expires_while_wa
         assert read_state(store, task_id) == (
             task, [*before[1], attempt], before[2]
         )
+
+def read_retry_schedule_clock(store):
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        return conn.execute("SELECT clock_timestamp()").fetchone()[0]
+
+
+def test_schedule_retry_saves_plan_without_starting_attempt(store):
+    task_id, attempt_id = make_failed_task(store)
+    before_task, before_attempts, before_steps = read_state(store, task_id)
+    assert before_task["next_retry_at"] is None
+
+    before_time = read_retry_schedule_clock(store)
+    scheduled = store.try_schedule_task_retry(
+        task_id,
+        attempt_id,
+        retryable_error=True,
+        outcome_unknown=False,
+        replay_safe=True,
+        delay_seconds=5,
+    )
+    after_time = read_retry_schedule_clock(store)
+
+    assert isinstance(scheduled, dict)
+    planned_at = scheduled["next_retry_at"]
+    assert planned_at is not None
+
+    # 计划时间应为调用期间的数据库时间加 5 秒。
+    assert before_time + timedelta(seconds=5) <= planned_at
+    assert planned_at <= after_time + timedelta(seconds=5)
+    assert planned_at < scheduled["retry_deadline_at"]
+
+    # Task 只改变计划时间；历史 Attempt 和步骤完整保留。
+    assert scheduled["status"] == "failed"
+    assert scheduled == {**before_task, "next_retry_at": planned_at}
+    assert read_state(store, task_id) == (
+        scheduled, before_attempts, before_steps
+    )
+
+
+def test_schedule_retry_reuses_existing_plan(store):
+    task_id, attempt_id = make_failed_task(store)
+    first = store.try_schedule_task_retry(
+        task_id,
+        attempt_id,
+        retryable_error=True,
+        outcome_unknown=False,
+        replay_safe=True,
+        delay_seconds=5,
+    )
+    assert isinstance(first, dict)
+    assert first["next_retry_at"] is not None
+    saved = read_state(store, task_id)
+    assert saved[0] == first
+
+    # 同一次失败再次安排，延迟改为 60 秒。
+    second = store.try_schedule_task_retry(
+        task_id,
+        attempt_id,
+        retryable_error=True,
+        outcome_unknown=False,
+        replay_safe=True,
+        delay_seconds=60,
+    )
+
+    # 返回原计划，数据库中的全部记录保持不变。
+    assert second == first
+    assert read_state(store, task_id) == saved
+
+@pytest.mark.parametrize(
+    ("deadline_seconds", "max_attempts", "delay_seconds", "overrides", "expected"),
+    [
+        pytest.param(
+            None, 3, 5, {}, RetryDecision.STOP, id="no-deadline"
+        ),
+        pytest.param(
+            -60, 3, 5, {}, RetryDecision.STOP, id="deadline-expired"
+        ),
+        pytest.param(
+            600, 1, 5, {}, RetryDecision.STOP, id="attempts-exhausted"
+        ),
+        pytest.param(
+            600, 3, 5, {"retryable_error": False},
+            RetryDecision.STOP, id="non-retryable"
+        ),
+        pytest.param(
+            600, 3, 3600, {}, RetryDecision.STOP,
+            id="planned-time-beyond-deadline"
+        ),
+        pytest.param(
+            None, 1, 5,
+            {"outcome_unknown": True, "replay_safe": False},
+            RetryDecision.RECONCILE, id="reconcile-before-budget"
+        ),
+    ],
+)
+def test_schedule_retry_refusal_preserves_database(
+    store, deadline_seconds, max_attempts, delay_seconds, overrides, expected
+):
+    deadline = (
+        None
+        if deadline_seconds is None
+        else deadline_for_creation(store, seconds=deadline_seconds)
+    )
+    task_id, attempt_id = make_failed_task(
+        store,
+        retry_deadline_at=deadline,
+        max_attempts=max_attempts,
+    )
+    before = read_state(store, task_id)
+    assert before[0]["next_retry_at"] is None
+
+    policy = {
+        "retryable_error": True,
+        "outcome_unknown": False,
+        "replay_safe": True,
+    }
+    policy.update(overrides)
+
+    decision = store.try_schedule_task_retry(
+        task_id,
+        attempt_id,
+        delay_seconds=delay_seconds,
+        **policy,
+    )
+
+    assert decision == expected
+
+    # 新连接回读：Task、Attempt 和步骤记录全部保持不变。
+    assert read_state(store, task_id) == before
+
+    if delay_seconds == 3600:
+        # 当前仍有时间预算，被拒绝是因为新计划会越过截止时间。
+        assert read_retry_schedule_clock(store) < deadline
