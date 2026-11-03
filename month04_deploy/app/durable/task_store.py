@@ -321,11 +321,29 @@ class TaskStore:
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # TODO 2：
-                # 执行 sql，三个参数依次是：
-                # Jsonb 包装的 result、task_id、
-                # 允许提交成功结果的当前状态。
-                # 用 fetchone() 将返回值赋给 row。
+                # 兼容早期仅有 tasks 表的任务；已领取过 Attempt 的任务走带凭据的接口。
+                cur.execute(
+                    """
+                    SELECT t.*, to_regclass('task_attempts') IS NOT NULL AS has_attempt_table
+                    FROM tasks AS t
+                    WHERE t.task_id = %s AND t.status = 'running'
+                    FOR UPDATE
+                    """,
+                    (task_id,),
+                )
+                task = cur.fetchone()
+                if (
+                    task is None
+                    or task.get("lease_version", 0) != 0
+                    or task.get("lease_expires_at") is not None
+                ):
+                    return None
+                if task["has_attempt_table"]:
+                    cur.execute(
+                        "SELECT 1 FROM task_attempts WHERE task_id = %s LIMIT 1", (task_id,)
+                    )
+                    if cur.fetchone() is not None:
+                        return None
                 cur.execute(sql, (Jsonb(result), task_id, "running"))
                 row = cur.fetchone()
 
@@ -533,6 +551,8 @@ class TaskStore:
                     """
                     UPDATE tasks
                     SET status = 'running',
+                        lease_version = lease_version + 1,
+                        lease_expires_at = clock_timestamp() + INTERVAL '10 seconds',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE task_id = %s
                       AND status = 'queued'
@@ -577,72 +597,100 @@ class TaskStore:
         task_id: UUID,
         attempt_id: UUID,
         result: dict[str, Any],
+        *,
+        expected_lease_version: int,
     ) -> dict[str, Any] | None:
-        """在同一事务中完成任务及其对应的 Attempt。"""
+        """在有效租约下同时提交 Task 和 Attempt 的成功结果。"""
+        return self._finish_claimed_task(
+            task_id, attempt_id, expected_lease_version, status="succeeded", result=result
+        )
 
-        task_sql = """
-            UPDATE tasks AS t
-            SET status = 'succeeded',
-                result = %s,
-                error = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE t.task_id = %s
-            AND t.status = 'running'
-            AND EXISTS (
-                SELECT 1
-                FROM task_attempts AS a
-                WHERE a.task_id = t.task_id
-                    AND a.attempt_id = %s
-                    AND a.status = 'running'
-            )
-            RETURNING t.*
-        """
+    @staticmethod
+    def _lock_live_claim(
+        cur, task_id: UUID, attempt_id: UUID, expected_lease_version: int,
+    ) -> datetime | None:
+        """先锁 Task，再锁对应的 running Attempt，返回有效租约的检查时间。"""
+        cur.execute(
+            """
+            SELECT lease_expires_at FROM tasks
+            WHERE task_id = %s AND status = 'running' AND lease_version = %s
+            FOR UPDATE
+            """,
+            (task_id, expected_lease_version),
+        )
+        task = cur.fetchone()
+        if task is None or task["lease_expires_at"] is None:
+            return None
 
-        attempt_sql = """
-            UPDATE task_attempts
-            SET status = 'succeeded',
-                error = NULL,
-                finished_at = CURRENT_TIMESTAMP
-            WHERE attempt_id = %s
-            AND task_id = %s
-            AND status = 'running'
-            RETURNING *
-        """
+        cur.execute(
+            """
+            SELECT 1 FROM task_attempts
+            WHERE task_id = %s AND attempt_id = %s AND status = 'running'
+            FOR UPDATE
+            """,
+            (task_id, attempt_id),
+        )
+        if cur.fetchone() is None:
+            return None
 
+        # 拿到两把行锁之后再取时间，等待期间也可能到期。
+        cur.execute("SELECT clock_timestamp() AS checked_at")
+        checked_at = cur.fetchone()["checked_at"]
+        if checked_at >= task["lease_expires_at"]:
+            return None
+        return checked_at
+
+    def _finish_claimed_task(
+        self,
+        task_id: UUID,
+        attempt_id: UUID,
+        expected_lease_version: int,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # TODO 1：
-                # 执行 task_sql。
-                # 参数依次为 Jsonb(result)、task_id、attempt_id。
-                # fetchone() 的结果赋给 task_row。
-                # 如果 task_row 为 None，使用你刚才的 A 分支。
-                # raise NotImplementedError("完成 TODO 1")
-                cur.execute(
-                    task_sql,
-                    (Jsonb(result), task_id, attempt_id),
+                checked_at = self._lock_live_claim(
+                    cur, task_id, attempt_id, expected_lease_version
                 )
-                task_row = cur.fetchone()
-                if task_row is None:
+                if checked_at is None:
                     return None
 
-                # TODO 2：
-                # 使用同一个 cur 执行 attempt_sql。
-                # 参数依次为 attempt_id、task_id。
-                # fetchone() 的结果赋给 attempt_row。
-                # 如果 attempt_row 为 None，使用你刚才的 B 分支。
-                # raise NotImplementedError("完成 TODO 2")
+                error_param = Jsonb(error) if error is not None else None
                 cur.execute(
-                    attempt_sql,
-                    (attempt_id, task_id),
+                    """
+                    UPDATE tasks
+                    SET status = %s, result = %s, error = %s,
+                        lease_expires_at = NULL, updated_at = %s
+                    WHERE task_id = %s AND status = 'running' AND lease_version = %s
+                    RETURNING *
+                    """,
+                    (
+                        status, Jsonb(result) if result is not None else None, error_param,
+                        checked_at, task_id, expected_lease_version,
+                    ),
                 )
-                attempt_row = cur.fetchone()
-                if attempt_row is None:
-                    raise RuntimeError(
-                        "尝试更新 Attempt 后没有返回记录"
-                    )
+                task = cur.fetchone()
+                if task is None:
+                    if status == "succeeded":
+                        raise RuntimeError("completion rejected: Task update returned no row")
+                    raise RuntimeError("failure recording rejected: Task update returned no row")
 
-        # 两次更新提交成功后，才返回任务结果。
-        return task_row
+                cur.execute(
+                    """
+                    UPDATE task_attempts
+                    SET status = %s, error = %s, finished_at = %s
+                    WHERE task_id = %s AND attempt_id = %s AND status = 'running'
+                    RETURNING attempt_id
+                    """,
+                    (status, error_param, checked_at, task_id, attempt_id),
+                )
+                if cur.fetchone() is None:
+                    raise RuntimeError("尝试更新 Attempt 后没有返回记录")
+
+        return task
 
     def get_running_attempt(
         self,
@@ -670,76 +718,13 @@ class TaskStore:
         task_id: UUID,
         attempt_id: UUID,
         error: dict[str, Any],
+        *,
+        expected_lease_version: int,
     ) -> dict[str, Any] | None:
-        """在同一事务中记录任务及其对应 Attempt 的失败。"""
-
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                # TODO 1：条件更新 Task。
-                #
-                # 更新上表中的 Task 字段。
-                # 条件：
-                #   1. task_id 匹配；
-                #   2. Task 当前为 running；
-                #   3. EXISTS 指定 attempt_id 的 running Attempt，
-                #      且它属于这个 Task。
-                #
-                # 使用 RETURNING，fetchone() 赋给 task_row。
-                # 如果 task_row 为 None，返回 None。
-                # raise NotImplementedError("完成 Task 失败更新")
-                cur.execute(
-                    """
-                    UPDATE tasks AS t
-                    SET status = 'failed',
-                        updated_at = CURRENT_TIMESTAMP,
-                        result = NULL,
-                        error = %s
-                    WHERE task_id = %s
-                        AND status = 'running'
-                        AND EXISTS (
-                            SELECT 1
-                            FROM task_attempts AS a
-                            WHERE a.task_id = t.task_id
-                            AND a.attempt_id = %s
-                            AND a.status = 'running'
-                        )
-                    RETURNING *
-                    """,
-                    (Jsonb(error), task_id, attempt_id),
-                )
-                task_row = cur.fetchone()
-                if task_row is None:
-                    return None
-                # TODO 2：使用同一个 cur 条件更新 Attempt。
-                #
-                # 更新上表中的 Attempt 字段。
-                # 条件：attempt_id、task_id 均匹配，且当前为 running。
-                #
-                # 使用 RETURNING，fetchone() 赋给 attempt_row。
-                # 如果 attempt_row 为 None，抛出 RuntimeError，
-                # 让前面的 Task 更新一起回滚。
-                # raise NotImplementedError("完成 Attempt 失败更新")
-                cur.execute(
-                    """
-                    UPDATE task_attempts
-                    SET status = 'failed',
-                        finished_at = CURRENT_TIMESTAMP,
-                        error = %s
-                    WHERE attempt_id = %s
-                        AND task_id = %s
-                        AND status = 'running'
-                    RETURNING *
-                    """,
-                    (Jsonb(error), attempt_id, task_id),
-                )
-                attempt_row = cur.fetchone()
-                if attempt_row is None:
-                    raise RuntimeError(
-                        "尝试更新 Attempt 后没有返回记录"
-                    )
-
-        # 提交成功后，返回已标记为 failed 的 Task。
-        return task_row
+        """在有效租约下同时提交 Task 和 Attempt 的失败原因。"""
+        return self._finish_claimed_task(
+            task_id, attempt_id, expected_lease_version, status="failed", error=error
+        )
 
     def try_retry_task_with_attempt(
         self,
@@ -826,6 +811,8 @@ class TaskStore:
                         result = NULL,
                         error = NULL,
                         next_retry_at = NULL,
+                        lease_version = t.lease_version + 1,
+                        lease_expires_at = clock_timestamp() + INTERVAL '10 seconds',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE t.task_id = %s
                       AND t.status = 'failed'
@@ -1183,3 +1170,168 @@ class TaskStore:
 
         # 两个 with 退出、事务提交成功后，返回新执行的结果。
         return result
+
+    def try_renew_task_lease(
+        self,
+        task_id: UUID,
+        expected_lease_version: int,
+    ) -> dict[str, Any] | None:
+        """为仍持有有效租约的 Worker 续租 10 秒。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT task_id FROM tasks WHERE task_id = %s FOR UPDATE",
+                    (task_id,),
+                )
+                if cur.fetchone() is None:
+                    return None
+
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET lease_expires_at = clock_timestamp() + INTERVAL '10 seconds'
+                    WHERE task_id = %s
+                      AND status = 'running'
+                      AND lease_version = %s
+                      AND lease_expires_at > clock_timestamp()
+                    RETURNING *
+                    """,
+                    (task_id, expected_lease_version),
+                )
+                renewed = cur.fetchone()
+
+        return renewed
+
+    def try_take_over_expired_task(
+        self,
+        task_id: UUID,
+        expected_lease_version: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """尝试接管一个过期的任务。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lease_expires_at, max_attempts, retry_deadline_at
+                    FROM tasks
+                    WHERE task_id = %s AND status = 'running' AND lease_version = %s
+                    FOR UPDATE
+                    """,
+                    (task_id, expected_lease_version),
+                )
+                task = cur.fetchone()
+                if task is None:
+                    return None
+
+                cur.execute("SELECT clock_timestamp() AS checked_at")
+                checked_at = cur.fetchone()["checked_at"]
+                expiry = task["lease_expires_at"]
+                if expiry is None or checked_at < expiry:
+                    return None
+                deadline = task["retry_deadline_at"]
+                if deadline is not None and checked_at >= deadline:
+                    return None
+
+                cur.execute(
+                    """
+                    SELECT attempt_id, attempt_no, status
+                    FROM task_attempts
+                    WHERE task_id = %s
+                    ORDER BY attempt_no DESC
+                    LIMIT 1
+                    """,
+                    (task_id,),
+                )
+                latest_attempt = cur.fetchone()
+                if latest_attempt is None or latest_attempt["status"] != "running":
+                    raise RuntimeError("接管时缺少预期的 running Attempt")
+                if latest_attempt["attempt_no"] >= task["max_attempts"]:
+                    return None
+
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET lease_version = lease_version + 1,
+                        lease_expires_at = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = %s
+                      AND status = 'running'
+                      AND lease_version = %s
+                      AND lease_expires_at <= %s
+                    RETURNING *
+                    """,
+                    (
+                        checked_at + timedelta(seconds=10),
+                        task_id,
+                        expected_lease_version,
+                        checked_at,
+                    ),
+                )
+                taken_task = cur.fetchone()
+                if taken_task is None:
+                    return None
+
+                cur.execute(
+                    """
+                    UPDATE task_attempts
+                    SET status = 'interrupted', finished_at = %s
+                    WHERE task_id = %s AND attempt_id = %s AND status = 'running'
+                    RETURNING attempt_no
+                    """,
+                    (checked_at, task_id, latest_attempt["attempt_id"]),
+                )
+                old_attempt = cur.fetchone()
+                if old_attempt is None:
+                    raise RuntimeError("接管时未能将旧 Attempt 标记为 interrupted")
+                new_attempt_no = old_attempt["attempt_no"] + 1
+
+                cur.execute(
+                    """
+                    INSERT INTO task_attempts (
+                        attempt_id, task_id, attempt_no, status, started_at
+                    )
+                    VALUES (%s, %s, %s, 'running', %s)
+                    RETURNING *
+                    """,
+                    (uuid4(), task_id, new_attempt_no, checked_at),
+                )
+                new_attempt = cur.fetchone()
+
+                if new_attempt is None:
+                    raise RuntimeError("插入 Attempt 后没有返回记录")
+
+        return taken_task, new_attempt
+
+    def try_save_completed_step(
+        self,
+        task_id: UUID,
+        step_index: int,
+        step_name: str,
+        result: dict[str, Any],
+        *,
+        expected_lease_version: int,
+        expected_attempt_id: UUID,
+    ) -> dict[str, Any] | None:
+        """仅当 Worker 仍持有有效租约且 Attempt 正在运行时保存步骤。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if self._lock_live_claim(
+                    cur, task_id, expected_attempt_id, expected_lease_version
+                ) is None:
+                    return None
+
+                cur.execute(
+                    """
+                    INSERT INTO task_steps (
+                        task_id, step_index, step_name, result
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (task_id, step_index, step_name, Jsonb(result)),
+                )
+                saved_step = cur.fetchone()
+                if saved_step is None:
+                    raise RuntimeError("保存步骤后没有返回记录")
+
+        return saved_step

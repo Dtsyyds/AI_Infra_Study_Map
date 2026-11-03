@@ -56,6 +56,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -320,7 +321,7 @@ def test_completion_rejected_is_not_reported_as_success(store):
     created = store.create_task("demo.echo", {"text": payload_text})
     task_id = created["task_id"]
 
-    # 真实故障注入：仅跳过 Task 的 succeeded 更新，使完成方法返回 None。
+    # 真实故障注入：仅跳过 Task 的 succeeded 更新，已通过租约校验的写入应报错。
     # queued -> running 不受影响；步骤仍正常执行、独立提交。
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute("""

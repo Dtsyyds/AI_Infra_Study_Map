@@ -75,6 +75,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -141,15 +142,15 @@ def make_failed_task(
     task_id = created["task_id"]
     claimed = store.try_start_task_with_attempt(task_id)
     assert isinstance(claimed, tuple) and len(claimed) == 2
-    _, attempt = claimed
+    running_task, attempt = claimed
     state = created["payload"]
     for index, (name, operation) in enumerate(worker.STEPS[:saved_count]):
         state = operation(state)
         store.save_completed_step(task_id, index, name, state)
     failed = store.try_fail_task_with_attempt(
-        task_id,
-        attempt["attempt_id"],
+        task_id, attempt["attempt_id"],
         {"type": "InjectedTestFailure", "message": "fixture failure"},
+        expected_lease_version=running_task["lease_version"],
     )
     assert failed is not None and failed["status"] == "failed"
     return task_id, attempt["attempt_id"]
@@ -240,6 +241,7 @@ def assert_succeeded_retry(store, task_id, finished, before):
     assert task["payload"] == before[0]["payload"]
     assert task["retry_deadline_at"] == before[0]["retry_deadline_at"]
     assert task["max_attempts"] == before[0]["max_attempts"]
+    assert task["lease_version"] == before[0]["lease_version"] + 1
     assert len(attempts) == 2
     assert attempts[0] == before[1][0]
     assert attempts[1]["attempt_id"] != attempts[0]["attempt_id"]
@@ -264,8 +266,11 @@ def assert_running_retry(store, task_id, before):
         "result": None,
         "error": None,
         "next_retry_at": None,
+        "lease_version": before[0]["lease_version"] + 1,
+        "lease_expires_at": task["lease_expires_at"],
         "updated_at": task["updated_at"],
     }
+    assert task["lease_expires_at"] is not None
     assert len(attempts) == 2
     assert attempts[0] == before[1][0]
     assert attempts[1]["attempt_id"] != attempts[0]["attempt_id"]
@@ -320,6 +325,13 @@ def test_failed_worker_retries_from_saved_input_with_new_attempt(store, monkeypa
     assert [index for index, _ in calls] == [0, 1]
     calls.clear()
 
+    # 让首次领取的租约过期，后面的两步必须使用重试领取的新租约。
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute(
+            "UPDATE tasks SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' "
+            "WHERE task_id = %s",
+            (task_id,),
+        )
     schedule_retry_now(store, task_id, before[1][0]["attempt_id"])
     before = read_state(store, task_id)
     finished = retry(store, task_id, before[1][0]["attempt_id"])
@@ -481,9 +493,10 @@ def test_rejected_claim_returns_none_without_execution_or_changes(store, monkeyp
                 task_id, old_attempt_id, **retry_arguments()
             )
             assert isinstance(claimed, tuple) and len(claimed) == 2
-            _, attempt = claimed
+            running_task, attempt = claimed
             failed = store.try_fail_task_with_attempt(
-                task_id, attempt["attempt_id"], {"message": "second fixture failure"}
+                task_id, attempt["attempt_id"], {"message": "second fixture failure"},
+                expected_lease_version=running_task["lease_version"],
             )
             assert failed is not None and failed["status"] == "failed"
             schedule_retry_now(store, task_id, attempt["attempt_id"])

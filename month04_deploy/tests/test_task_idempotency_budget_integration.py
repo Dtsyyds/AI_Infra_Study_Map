@@ -55,6 +55,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -160,16 +161,19 @@ def test_same_request_preserves_existing_execution_state(store, status):
     if status != "queued":
         claimed = store.try_start_task_with_attempt(task_id)
         assert claimed is not None
-        _, attempt = claimed
+        running_task, attempt = claimed
         store.save_completed_step(task_id, 0, "read_input_v1", created["payload"])
         if status == "failed":
             closed = store.try_fail_task_with_attempt(
-                task_id, attempt["attempt_id"], {"type": "ValueError", "message": "saved failure"}
+                task_id, attempt["attempt_id"],
+                {"type": "ValueError", "message": "saved failure"},
+                expected_lease_version=running_task["lease_version"],
             )
             assert closed is not None
         elif status == "succeeded":
             closed = store.try_succeed_task_with_attempt(
-                task_id, attempt["attempt_id"], {"answer": "saved result"}
+                task_id, attempt["attempt_id"], {"answer": "saved result"},
+                expected_lease_version=running_task["lease_version"],
             )
             assert closed is not None
 

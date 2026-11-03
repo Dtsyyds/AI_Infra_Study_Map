@@ -46,6 +46,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -133,7 +134,8 @@ def test_failure_commits_error_to_task_and_existing_attempt(store):
     assert before_attempts == [attempt]
 
     failed = store.try_fail_task_with_attempt(
-        task_id, attempt["attempt_id"], error
+        task_id, attempt["attempt_id"], error,
+        expected_lease_version=task["lease_version"],
     )
 
     assert failed is not None
@@ -144,6 +146,7 @@ def test_failure_commits_error_to_task_and_existing_attempt(store):
         "result": None,
         "error": error,
         "updated_at": failed["updated_at"],
+        "lease_expires_at": None,
     }
     saved_task, saved_attempts = read_state(store, task_id)
     assert saved_task == failed
@@ -173,7 +176,8 @@ def test_wrong_attempt_returns_none_without_changes(store, bad_attempt_kind):
     )
 
     assert store.try_fail_task_with_attempt(
-        task_id, wrong_attempt_id, {"message": "must not be saved"}
+        task_id, wrong_attempt_id, {"message": "must not be saved"},
+        expected_lease_version=target_task["lease_version"],
     ) is None
 
     assert read_state(store, task_id) == before_target
@@ -185,7 +189,8 @@ def test_repeated_failure_preserves_first_error_and_finish_time(store):
     task_id = task["task_id"]
     first_error = {"type": "ValueError", "message": "first failure"}
     failed = store.try_fail_task_with_attempt(
-        task_id, attempt["attempt_id"], first_error
+        task_id, attempt["attempt_id"], first_error,
+        expected_lease_version=task["lease_version"],
     )
     assert failed is not None
     before_task, before_attempts = read_state(store, task_id)
@@ -197,7 +202,8 @@ def test_repeated_failure_preserves_first_error_and_finish_time(store):
     assert before_attempts[0]["finished_at"] is not None
 
     assert store.try_fail_task_with_attempt(
-        task_id, attempt["attempt_id"], {"message": "must not replace first error"}
+        task_id, attempt["attempt_id"], {"message": "must not replace first error"},
+        expected_lease_version=task["lease_version"],
     ) is None
 
     assert read_state(store, task_id) == (before_task, before_attempts)
@@ -208,7 +214,8 @@ def test_succeeded_task_cannot_be_overwritten_as_failed(store):
     task_id = task["task_id"]
     result = {"answer": "echo:already finished"}
     succeeded = store.try_succeed_task_with_attempt(
-        task_id, attempt["attempt_id"], result
+        task_id, attempt["attempt_id"], result,
+        expected_lease_version=task["lease_version"],
     )
     assert succeeded is not None
     assert succeeded["status"] == "succeeded"
@@ -216,7 +223,8 @@ def test_succeeded_task_cannot_be_overwritten_as_failed(store):
     before = read_state(store, task_id)
 
     assert store.try_fail_task_with_attempt(
-        task_id, attempt["attempt_id"], {"message": "late failure"}
+        task_id, attempt["attempt_id"], {"message": "late failure"},
+        expected_lease_version=task["lease_version"],
     ) is None
 
     assert read_state(store, task_id) == before
@@ -243,7 +251,8 @@ def test_closed_attempt_is_rejected_before_task_is_modified(store):
     assert before[1][0]["status"] == "interrupted"
 
     assert store.try_fail_task_with_attempt(
-        task_id, attempt["attempt_id"], {"message": "must not overwrite history"}
+        task_id, attempt["attempt_id"], {"message": "must not overwrite history"},
+        expected_lease_version=task["lease_version"],
     ) is None
 
     assert read_state(store, task_id) == before
@@ -264,7 +273,8 @@ def test_attempt_sql_error_rolls_back_task_failure(store):
 
     with pytest.raises(psycopg.errors.CheckViolation) as caught:
         store.try_fail_task_with_attempt(
-            task_id, attempt["attempt_id"], {"message": "must roll back"}
+            task_id, attempt["attempt_id"], {"message": "must roll back"},
+            expected_lease_version=task["lease_version"],
         )
 
     assert caught.value.diag.table_name == "task_attempts"
@@ -311,7 +321,8 @@ def test_attempt_zero_rows_raises_and_rolls_back_task_failure(store):
     # 必须抛 RuntimeError 触发回滚；正常返回 None 会提交前面的 Task 更新。
     with pytest.raises(RuntimeError):
         store.try_fail_task_with_attempt(
-            task_id, attempt["attempt_id"], {"message": "must also roll back"}
+            task_id, attempt["attempt_id"], {"message": "must also roll back"},
+            expected_lease_version=task["lease_version"],
         )
 
     assert read_state(store, task_id) == before

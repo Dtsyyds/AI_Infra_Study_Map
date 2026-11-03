@@ -13,7 +13,7 @@
 不要加入生产迁移。
 
 7 个用例运行真实独立 Worker 进程，并用新连接检查持久化记录。
-最后 1 个直接调用真实 Worker，仅替换 save_completed_step 来注入保存前的
+最后 1 个直接调用真实 Worker，仅替换 try_save_completed_step 来注入保存前的
 ValueError，验证异常捕获范围；其余存储方法仍连接真实数据库。
 人工恢复用例先在测试中准备已领取状态，不存在同时运行的旧 Worker。
 """
@@ -56,6 +56,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -229,7 +230,7 @@ def test_rejected_failure_record_raises_runtime_error_without_changes(store):
     assert_still_running(before)
     assert before[2] == []
 
-    # 跳过 Task 的 failed 更新，让真实 try_fail_task_with_attempt 返回 None。
+    # 跳过 Task 的 failed 更新，检验有效持有者的写入异常。
     with psycopg.connect(store.dsn, connect_timeout=5) as conn:
         conn.execute("""
             CREATE FUNCTION test_reject_task_failure()
@@ -339,13 +340,18 @@ def test_checkpoint_value_error_is_outside_business_error_handler(store, monkeyp
     injected = ValueError("injected checkpoint serialization failure")
     save_calls = []
 
-    def fail_before_saving(_self, saved_task_id, step_index, step_name, result):
+    def fail_before_saving(
+        _self, saved_task_id, step_index, step_name, result, *,
+        expected_lease_version, expected_attempt_id,
+    ):
+        assert expected_lease_version == before[0]["lease_version"]
+        assert expected_attempt_id == before[1][0]["attempt_id"]
         save_calls.append((saved_task_id, step_index, step_name, result))
         raise injected
 
     # 唯一的方法替换：模拟保存前的 ValueError，明确检查 try/except 的边界。
     # 其他 TaskStore 方法不替换，因此错误捕获范围过大会真实写成 failed。
-    monkeypatch.setattr(TaskStore, "save_completed_step", fail_before_saving)
+    monkeypatch.setattr(TaskStore, "try_save_completed_step", fail_before_saving)
 
     with pytest.raises(ValueError) as caught:
         run_task_once(store, task_id, resume=True)

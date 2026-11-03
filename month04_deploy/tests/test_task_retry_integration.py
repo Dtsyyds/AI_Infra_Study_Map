@@ -65,6 +65,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -138,7 +139,7 @@ def make_failed_task(
     assert created["retry_deadline_at"] == retry_deadline_at
     assert created["max_attempts"] == max_attempts
     task_id = created["task_id"]
-    _, attempt = assert_claimed(store.try_start_task_with_attempt(task_id))
+    running_task, attempt = assert_claimed(store.try_start_task_with_attempt(task_id))
     store.save_completed_step(
         task_id, 0, "read_input_v1", {"text": "retry acceptance"}
     )
@@ -148,7 +149,10 @@ def make_failed_task(
         "step_index": 1,
         "step_name": "build_echo_v1",
     }
-    failed = store.try_fail_task_with_attempt(task_id, attempt["attempt_id"], error)
+    failed = store.try_fail_task_with_attempt(
+        task_id, attempt["attempt_id"], error,
+        expected_lease_version=running_task["lease_version"],
+    )
     assert failed is not None and failed["status"] == "failed"
     saved_task, attempts, steps = read_state(store, task_id)
     assert saved_task == failed
@@ -205,16 +209,21 @@ def test_retry_commits_task_and_new_attempt_preserves_history(store, outcome_unk
         )
     before_task, before_attempts, before_steps = read_state(store, task_id)
 
+    earliest_expiry = deadline_for_creation(store, seconds=10)
     task, attempt = assert_claimed(
         retry(store, task_id, old_attempt_id, outcome_unknown=outcome_unknown)
     )
+    latest_expiry = deadline_for_creation(store, seconds=10)
 
+    assert earliest_expiry <= task["lease_expires_at"] <= latest_expiry
     assert task == {
         **before_task,
         "status": "running",
         "result": None,
         "error": None,
         "next_retry_at": None,
+        "lease_version": before_task["lease_version"] + 1,
+        "lease_expires_at": task["lease_expires_at"],
         "updated_at": task["updated_at"],
     }
     assert task["updated_at"] >= before_task["updated_at"]
@@ -235,10 +244,13 @@ def test_retried_attempt_can_succeed_without_rewriting_old_failure(store):
     task_id, old_attempt_id = make_failed_task(store)
     schedule_retry_now(store, task_id, old_attempt_id)
     before = read_state(store, task_id)
-    _, attempt = assert_claimed(retry(store, task_id, old_attempt_id))
+    running_task, attempt = assert_claimed(retry(store, task_id, old_attempt_id))
 
     result = {"answer": "echo:retry acceptance"}
-    finished = store.try_succeed_task_with_attempt(task_id, attempt["attempt_id"], result)
+    finished = store.try_succeed_task_with_attempt(
+        task_id, attempt["attempt_id"], result,
+        expected_lease_version=running_task["lease_version"],
+    )
 
     task, attempts, steps = read_state(store, task_id)
     assert finished is not None and task == finished
@@ -329,7 +341,8 @@ def test_stale_request_cannot_retry_newer_failure(store):
     assert second_task["retry_deadline_at"] == original_deadline
     second_error = {"type": "TransientTestError", "message": "second failure"}
     assert store.try_fail_task_with_attempt(
-        task_id, second_attempt["attempt_id"], second_error
+        task_id, second_attempt["attempt_id"], second_error,
+        expected_lease_version=second_task["lease_version"],
     ) is not None
     schedule_retry_now(store, task_id, second_attempt["attempt_id"])
     before = read_state(store, task_id)
@@ -380,11 +393,12 @@ def test_non_failed_or_missing_task_returns_none(store, state):
     if state != "missing":
         task_id = store.create_task("demo.echo", {"text": "state guard"})["task_id"]
         if state in ("running", "succeeded"):
-            _, attempt = assert_claimed(store.try_start_task_with_attempt(task_id))
+            running_task, attempt = assert_claimed(store.try_start_task_with_attempt(task_id))
             expected_id = attempt["attempt_id"]
             if state == "succeeded":
                 assert store.try_succeed_task_with_attempt(
-                    task_id, expected_id, {"answer": "done"}
+                    task_id, expected_id, {"answer": "done"},
+                    expected_lease_version=running_task["lease_version"],
                 ) is not None
         elif state == "cancelled":
             with psycopg.connect(store.dsn, connect_timeout=5) as conn:
@@ -590,7 +604,8 @@ def test_persisted_limit_stops_fourth_attempt_after_three_failures(store):
             "message": f"attempt {expected_no} failed",
         }
         failed = store.try_fail_task_with_attempt(
-            task_id, attempt["attempt_id"], error
+            task_id, attempt["attempt_id"], error,
+            expected_lease_version=task["lease_version"],
         )
         task, attempts, steps = read_state(store, task_id)
         assert failed is not None and task == failed
@@ -677,6 +692,7 @@ def test_retry_consumes_plan_and_new_failure_gets_fresh_plan(store):
     failed = store.try_fail_task_with_attempt(
         task_id, second_attempt["attempt_id"],
         {"type": "TransientTestError", "message": "second failure needs a fresh plan"},
+        expected_lease_version=running_task["lease_version"],
     )
     assert failed is not None and failed["status"] == "failed"
     before = read_state(store, task_id)
@@ -709,7 +725,7 @@ def wait_for_task_row_block(monitor, application_name, blocker_pid, future):
         if future.done():
             # 先传播实现异常；若正常返回，则明确报告没有观察到预期的行锁等待。
             value = future.result()
-            pytest.fail(f"重试调用未保持等待 Task 行锁就结束：{value!r}")
+            pytest.fail(f"操作在测试释放 Task 行锁前已经结束：{value!r}")
         row = monitor.execute(
             """
             SELECT pid, xact_start, wait_event_type
@@ -725,7 +741,7 @@ def wait_for_task_row_block(monitor, application_name, blocker_pid, future):
             assert row["xact_start"] is not None
             return row
         sleep(0.05)
-    pytest.fail("4 秒内未观察到测试重试连接被 Task 行锁阻塞，请检查测试环境")
+    pytest.fail("4 秒内未观察到测试连接被 Task 行锁阻塞，请检查测试环境")
 
 
 @pytest.mark.parametrize(

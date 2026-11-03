@@ -294,8 +294,10 @@ def _execute_claimed_task(
     *,
     restore_from_steps: bool,
     crash_after_step: int | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     task_id = task["task_id"]
+    expected_lease_version = task["lease_version"]
+    expected_attempt_id = attempt["attempt_id"]
 
     # TODO 1：
     # 将原 run_task_once 中，从 task_type 校验开始，
@@ -346,31 +348,25 @@ def _execute_claimed_task(
                 "step_index": step_index,
                 "step_name": step_name,
             }
-            # TODO 1：
-            # 调用 store.try_fail_task_with_attempt()。
-            # 参数：task_id、attempt["attempt_id"]、error。
-            # 返回值赋给 failed。
             failed = store.try_fail_task_with_attempt(
-                task_id, attempt["attempt_id"], error)
-
-            # TODO 2：
-            # 如果 failed 为 None，说明失败记录没有被接受。
-            # 抛出 RuntimeError("failure recording rejected") from exc。
+                task_id, expected_attempt_id, error,
+                expected_lease_version=expected_lease_version,
+            )
             if failed is None:
-                raise RuntimeError(
-                    "failure recording rejected") from exc
-            # 完成以上两项后，删除下面这个占位异常。
-
-            # 失败记录提交成功后，继续向调用方抛出原始 ValueError。
+                return None
             raise
 
 
-        store.save_completed_step(
+        saved_step = store.try_save_completed_step(
             task_id,
             step_index,
             step_name,
             state,
+            expected_lease_version=expected_lease_version,
+            expected_attempt_id=expected_attempt_id,
         )
+        if saved_step is None:
+            return None
 
         print(
             f"STEP_SAVED index={step_index} name={step_name}",
@@ -384,16 +380,10 @@ def _execute_claimed_task(
             )
             os._exit(86)
 
-    # finished = store.try_succeed_task(task_id, state)
-    finished = store.try_succeed_task_with_attempt(
-        task_id, attempt["attempt_id"], state)
-
-    if finished is None:
-        raise RuntimeError(
-            "completion rejected: task state no longer matches"
-        )
-
-    return finished
+    return store.try_succeed_task_with_attempt(
+        task_id, expected_attempt_id, state,
+        expected_lease_version=expected_lease_version,
+    )
 
     # TODO 2：
     # 将迁移过来的检查点分支：
@@ -494,8 +484,7 @@ def main() -> int:
 
     if finished is None:
         print(
-            "NOT_ELIGIBLE: task missing or status is not "
-            "eligible for the selected mode",
+            "NOT_ELIGIBLE: task missing, status ineligible, or claim no longer valid",
             flush=True,
         )
         return 2

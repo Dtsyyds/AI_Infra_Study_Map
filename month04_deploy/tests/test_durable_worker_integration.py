@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from month04_deploy.app.durable.task_store import TaskStore
+from month04_deploy.tests.test_worker_attempts_integration import store as store
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,11 +35,9 @@ def run_worker(task_id, *extra_args):
 
 
 @pytest.mark.parametrize("crash_step", [0, 1, 2])
-def test_resume_after_committed_step(crash_step):
-    dsn = os.getenv("AGENT_DATABASE_URL")
-    assert dsn, "已启用数据库测试，但缺少 AGENT_DATABASE_URL"
-
-    store = TaskStore(dsn)
+def test_resume_after_committed_step(crash_step, store, monkeypatch):
+    # 子进程和父进程使用同一个已应用 010 的临时 schema。
+    monkeypatch.setenv("AGENT_DATABASE_URL", store.dsn)
 
     text = f"integration-crash-{crash_step}"
     expected_result = {"answer": f"echo:{text}"}

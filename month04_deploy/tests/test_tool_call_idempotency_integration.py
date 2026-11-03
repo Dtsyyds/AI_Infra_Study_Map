@@ -5,7 +5,7 @@ AGENT_RUN_DB_TESTS=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest \
     -p pytest_asyncio.plugin --tb=short -x -q \
     month04_deploy/tests/test_tool_call_idempotency_integration.py
 
-每个用例使用独立随机 schema 并在结束后清理。默认加载 001～009，升级用例先在 008 中写入旧数据。
+每个用例使用独立随机 schema 并在结束后清理。默认加载 001～010，升级用例先在 008 中写入旧数据。
 通过新连接读取提交后的完整记录；故障注入只作用于当前测试 schema。
 子进程测试调用 TaskStore，退出后由父进程显式标记失败、安排并领取重试。
 本文件验收存储层工具事务；Worker 的工具接入与自动恢复另行验收。
@@ -61,6 +61,7 @@ def store(request):
     migrations = [MIGRATIONS_DIR / name for name in names]
     if getattr(request, "param", None) != "before_009":
         migrations.append(STATUS_MIGRATION)
+        migrations.append(MIGRATIONS_DIR / "010_add_task_lease.sql")
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
 
@@ -146,11 +147,13 @@ def assert_claimed(value):
     return task, attempt
 
 
-def make_running_task(store):
+def claim_running_task(store):
     created = create_task(store)
-    task, attempt = assert_claimed(
-        store.try_start_task_with_attempt(created["task_id"])
-    )
+    return assert_claimed(store.try_start_task_with_attempt(created["task_id"]))
+
+
+def make_running_task(store):
+    task, attempt = claim_running_task(store)
     return task["task_id"], attempt["attempt_id"]
 
 
@@ -295,7 +298,8 @@ def test_same_logical_position_rejects_changed_operation_without_any_write(store
 
 
 def test_process_exit_after_tool_commit_then_new_attempt_replays_without_increment(store):
-    task_id, first_attempt_id = make_running_task(store)
+    running_task, claimed_attempt = claim_running_task(store)
+    task_id, first_attempt_id = running_task["task_id"], claimed_attempt["attempt_id"]
     seed_counter(store, 7)
     before = read_state(store)
     expected = {"counter_name": COUNTER_NAME, "value": 8}
@@ -343,6 +347,7 @@ def test_process_exit_after_tool_commit_then_new_attempt_replays_without_increme
     failed = store.try_fail_task_with_attempt(
         task_id, first_attempt_id,
         {"type": "InjectedProcessExit", "message": "tool committed before checkpoint"},
+        expected_lease_version=running_task["lease_version"],
     )
     assert failed is not None and failed["status"] == "failed"
     policy = {
@@ -468,14 +473,17 @@ def test_missing_or_non_running_task_cannot_execute_tool(store, state):
     if state == "queued":
         task_id = create_task(store)["task_id"]
     elif state in ("failed", "succeeded"):
-        task_id, attempt_id = make_running_task(store)
+        running_task, claimed_attempt = claim_running_task(store)
+        task_id, attempt_id = running_task["task_id"], claimed_attempt["attempt_id"]
         if state == "failed":
             closed = store.try_fail_task_with_attempt(
-                task_id, attempt_id, {"message": "task already failed"}
+                task_id, attempt_id, {"message": "task already failed"},
+                expected_lease_version=running_task["lease_version"],
             )
         else:
             closed = store.try_succeed_task_with_attempt(
-                task_id, attempt_id, {"answer": "task already finished"}
+                task_id, attempt_id, {"answer": "task already finished"},
+                expected_lease_version=running_task["lease_version"],
             )
         assert closed is not None and closed["status"] == state
     seed_counter(store, 7)
@@ -560,7 +568,23 @@ def test_database_enforces_both_tool_call_uniqueness_constraints(store, duplicat
 
 @pytest.mark.parametrize("store", ["before_009"], indirect=True)
 def test_009_upgrades_committed_call_and_preserves_original_result(store):
-    task_id, attempt_id = make_running_task(store)
+    # 在 008 的表结构中准备已提交的 Task 和 Attempt。
+    task_id, attempt_id = uuid4(), uuid4()
+    with psycopg.connect(store.dsn, connect_timeout=5) as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks (task_id, task_type, payload, status)
+            VALUES (%s, 'demo.echo', '{"text":"before 009"}'::jsonb, 'running')
+            """,
+            (task_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO task_attempts (attempt_id, task_id, attempt_no, status)
+            VALUES (%s, %s, 1, 'running')
+            """,
+            (attempt_id, task_id),
+        )
     seed_counter(store, 7)
     expected = {"counter_name": COUNTER_NAME, "value": 8}
     assert increment(store, task_id, attempt_id) == expected
@@ -740,7 +764,8 @@ def test_prepare_external_rejects_changed_request_without_overwriting_started(st
 
 
 def test_prepare_external_new_attempt_can_read_confirmed_result_and_old_attempt_is_refused(store):
-    task_id, old_id = make_running_task(store)
+    running_task, claimed_attempt = claim_running_task(store)
+    task_id, old_id = running_task["task_id"], claimed_attempt["attempt_id"]
     row, inserted = prepare_external(store, task_id, old_id)
     assert inserted is True
     # 准备已确认成功的工具结果。之后失败的是同一 Task 的后续步骤。
@@ -756,7 +781,8 @@ def test_prepare_external_new_attempt_can_read_confirmed_result_and_old_attempt_
     assert confirmed["result"] == {"receipt": "ticket-8"}
 
     failed = store.try_fail_task_with_attempt(
-        task_id, old_id, {"message": "failure in a later step"}
+        task_id, old_id, {"message": "failure in a later step"},
+        expected_lease_version=running_task["lease_version"],
     )
     assert failed is not None and failed["status"] == "failed"
     after_failure = read_state(store)

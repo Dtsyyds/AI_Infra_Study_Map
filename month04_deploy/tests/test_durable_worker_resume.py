@@ -36,10 +36,12 @@ def test_resume_skips_saved_steps(completed_count):
         "task_type": "demo.echo",
         "payload": {"text": "crash lesson"},
         "status": "running",
+        "lease_version": 4,
     }
     final_result = {"answer": "echo:crash lesson"}
 
     store.get_task.return_value = task
+    store.try_save_completed_step.return_value = {"task_id": task_id}
     store.get_running_attempt.return_value = {
         "attempt_id": attempt_id,
         "task_id": task_id,
@@ -76,6 +78,8 @@ def test_resume_skips_saved_steps(completed_count):
                 2,
                 "format_result_v1",
                 final_result,
+                expected_lease_version=4,
+                expected_attempt_id=attempt_id,
             )
         ]
         if completed_count == 2
@@ -83,11 +87,12 @@ def test_resume_skips_saved_steps(completed_count):
     )
 
     assert (
-        store.save_completed_step.call_args_list
+        store.try_save_completed_step.call_args_list
         == expected_saves
     )
     store.try_succeed_task_with_attempt.assert_called_once_with(
         task_id,
         attempt_id,
         final_result,
+        expected_lease_version=4,
     )

@@ -10,15 +10,17 @@
         python -m pytest -p pytest_asyncio.plugin --tb=short \
         -q month04_deploy/tests/test_task_attempts_integration.py
 
-每个测试创建独立 schema，仅应用 001/004 迁移，结束后删除该 schema。
-共 9 个测试用例。使用真实连接、事务与数据库约束，不 mock SQL 或连接。
+每个测试在独立 schema 中应用所需迁移（含 010），结束后清理。
+通过独立连接回读首次领取结果、租约和对应的 Attempt。
 故障注入：重复 UUID、临时 CHECK 约束、返回 NULL 的 BEFORE UPDATE 触发器。
 约束和触发器仅创建在当前测试的随机 schema，随该 schema 一起删除。
 测试账号需要拥有目标数据库的 CREATE SCHEMA 权限。
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import psycopg
@@ -49,6 +51,7 @@ def store():
         migrations_dir / "005_add_task_retry_deadline.sql",
         migrations_dir / "006_add_task_max_attempts.sql",
         migrations_dir / "007_add_task_next_retry_at.sql",
+        migrations_dir / "010_add_task_lease.sql",
     ]
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
@@ -116,13 +119,22 @@ def read_attempts(store: TaskStore, task_id: UUID):
 def test_first_start_commits_task_and_attempt(store):
     created = store.create_task("demo.echo", {"text": "first attempt"})
     task_id = created["task_id"]
+    assert (created["lease_version"], created["lease_expires_at"]) == (0, None)
 
-    claimed = store.try_start_task_with_attempt(task_id)
+    # 用同一数据库的时钟包住领取过程，核验 10 秒期限。
+    bound_sql = "SELECT clock_timestamp() + INTERVAL '10 seconds'"
+    with psycopg.connect(store.dsn, connect_timeout=5, autocommit=True) as clock:
+        earliest_expiry = clock.execute(bound_sql).fetchone()[0]
+        claimed = store.try_start_task_with_attempt(task_id)
+        latest_expiry = clock.execute(bound_sql).fetchone()[0]
 
     assert claimed is not None
     task, attempt = claimed
     assert task["task_id"] == task_id
     assert task["status"] == "running"
+    assert task["lease_version"] == 1
+    assert task["lease_expires_at"] is not None
+    assert earliest_expiry <= task["lease_expires_at"] <= latest_expiry
     assert attempt["task_id"] == task_id
     assert isinstance(attempt["attempt_id"], UUID)
     assert attempt["attempt_no"] == 1
@@ -136,6 +148,30 @@ def test_first_start_commits_task_and_attempt(store):
     assert read_attempts(store, task_id) == [attempt]
 
 
+def test_concurrent_first_start_grants_one_lease(store):
+    task_id = store.create_task("demo.echo", {"text": "competing workers"})["task_id"]
+    ready = Barrier(2, timeout=10)
+
+    def claim():
+        worker_store = TaskStore(store.dsn)
+        ready.wait()
+        return worker_store.try_start_task_with_attempt(task_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim) for _ in range(2)]
+        results = [future.result(timeout=20) for future in futures]
+
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    task, attempt = winners[0]
+    assert (task["status"], task["lease_version"]) == ("running", 1)
+    assert task["lease_expires_at"] is not None
+    assert attempt["task_id"] == task_id
+    assert (attempt["attempt_no"], attempt["status"]) == (1, "running")
+    assert read_task(store, task_id) == task
+    assert read_attempts(store, task_id) == [attempt]
+
+
 def test_repeated_start_does_not_change_task_or_append_attempt(store):
     created = store.create_task("demo.echo", {"text": "repeat claim"})
     task_id = created["task_id"]
@@ -143,6 +179,8 @@ def test_repeated_start_does_not_change_task_or_append_attempt(store):
 
     before_task = read_task(store, task_id)
     before_attempts = read_attempts(store, task_id)
+    assert before_task["lease_version"] == 1
+    assert before_task["lease_expires_at"] is not None
     assert len(before_attempts) == 1
 
     assert store.try_start_task_with_attempt(task_id) is None
@@ -182,6 +220,7 @@ def test_attempt_insert_failure_rolls_back_task_update(store, monkeypatch):
     after_task = read_task(store, task_id)
     assert after_task is not None
     assert after_task["status"] == "queued"
+    assert (after_task["lease_version"], after_task["lease_expires_at"]) == (0, None)
     assert after_task["updated_at"] == before_task["updated_at"]
     assert after_task == before_task
     assert read_attempts(store, task_id) == []
@@ -200,7 +239,8 @@ def test_success_commits_task_result_and_attempt_finish(store):
     result = {"text": "执行成功", "steps": [0, 1, 2], "meta": {"retried": False}}
 
     completed = store.try_succeed_task_with_attempt(
-        task_id, running_attempt["attempt_id"], result
+        task_id, running_attempt["attempt_id"], result,
+        expected_lease_version=running_task["lease_version"],
     )
 
     assert completed is not None
@@ -241,7 +281,8 @@ def test_wrong_attempt_does_not_modify_either_task(store, bad_attempt_kind):
         wrong_attempt_id = uuid4()
 
     completed = store.try_succeed_task_with_attempt(
-        target["task_id"], wrong_attempt_id, {"text": "must not be saved"}
+        target["task_id"], wrong_attempt_id, {"text": "must not be saved"},
+        expected_lease_version=target_task["lease_version"],
     )
 
     assert completed is None
@@ -256,11 +297,14 @@ def test_repeated_success_preserves_first_result_and_finish_time(store):
     task_id = created["task_id"]
     claimed = store.try_start_task_with_attempt(task_id)
     assert claimed is not None
-    _, attempt = claimed
+    running_task, attempt = claimed
     attempt_id = attempt["attempt_id"]
     first_result = {"text": "first result"}
 
-    completed = store.try_succeed_task_with_attempt(task_id, attempt_id, first_result)
+    completed = store.try_succeed_task_with_attempt(
+        task_id, attempt_id, first_result,
+        expected_lease_version=running_task["lease_version"],
+    )
     assert completed is not None
     before_task = read_task(store, task_id)
     before_attempts = read_attempts(store, task_id)
@@ -271,7 +315,8 @@ def test_repeated_success_preserves_first_result_and_finish_time(store):
     assert before_attempts[0]["status"] == "succeeded"
 
     assert store.try_succeed_task_with_attempt(
-        task_id, attempt_id, {"text": "must not overwrite the first result"}
+        task_id, attempt_id, {"text": "must not overwrite the first result"},
+        expected_lease_version=running_task["lease_version"],
     ) is None
 
     assert read_task(store, task_id) == before_task
@@ -295,7 +340,8 @@ def test_attempt_update_sql_error_rolls_back_task_success(store):
 
     with pytest.raises(psycopg.errors.CheckViolation) as caught:
         store.try_succeed_task_with_attempt(
-            task_id, before_attempt["attempt_id"], {"text": "must roll back"}
+            task_id, before_attempt["attempt_id"], {"text": "must roll back"},
+            expected_lease_version=before_task["lease_version"],
         )
 
     assert caught.value.diag.table_name == "task_attempts"
@@ -344,7 +390,8 @@ def test_attempt_update_zero_rows_raises_and_rolls_back_task_success(store):
     # 此处必须是业务 RuntimeError，不能是 SQL 错误，也不能正常 return None。
     with pytest.raises(RuntimeError):
         store.try_succeed_task_with_attempt(
-            task_id, before_attempt["attempt_id"], {"text": "must also roll back"}
+            task_id, before_attempt["attempt_id"], {"text": "must also roll back"},
+            expected_lease_version=before_task["lease_version"],
         )
 
     assert read_task(store, task_id) == before_task
