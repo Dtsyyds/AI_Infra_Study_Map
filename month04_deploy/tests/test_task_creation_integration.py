@@ -110,6 +110,7 @@ def store(database_before_max_attempts):
             next_retry_migration,
             max_attempts_migration.with_name("012_create_task_runtime_limits.sql"),
             max_attempts_migration.with_name("013_add_task_queue_limit.sql"),
+            max_attempts_migration.with_name("014_add_task_cleanup.sql"),
         ):
             conn.execute(
                 migration.read_text(encoding="utf-8"),

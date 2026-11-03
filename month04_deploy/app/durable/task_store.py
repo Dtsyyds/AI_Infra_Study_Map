@@ -364,7 +364,7 @@ class TaskStore:
             """
             SELECT COUNT(*) AS running_count
             FROM tasks
-            WHERE status = 'running'
+            WHERE status = 'running' OR cleanup_pending IS TRUE
             """
         )
         return cur.fetchone()["running_count"] < limit
@@ -380,6 +380,7 @@ class TaskStore:
                 updated_at = CURRENT_TIMESTAMP
             WHERE task_id = %s
               AND status = %s
+              AND NOT cleanup_pending
             RETURNING *
         """
 
@@ -637,6 +638,7 @@ class TaskStore:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE task_id = %s
                       AND status = 'queued'
+                      AND NOT cleanup_pending
                     RETURNING *
                     """,
                     (task_id,),
@@ -746,6 +748,7 @@ class TaskStore:
         status: str,
         result: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
+        cleanup_pending: bool = False,
     ) -> dict[str, Any] | None:
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -760,6 +763,21 @@ class TaskStore:
                         cur, task_id, attempt_id, expected_lease_version, checked_at,
                         status=status, result=result, error=error,
                     )
+                if cleanup_pending:
+                    # Task 行仍由本事务锁定。已登记的取消也必须保留该容器的名额。
+                    cur.execute(
+                        """
+                        UPDATE tasks
+                        SET cleanup_pending = TRUE, cleanup_attempt_id = %s
+                        WHERE task_id = %s
+                          AND (NOT cleanup_pending OR cleanup_attempt_id = %s)
+                        RETURNING *
+                        """,
+                        (attempt_id, task_id, attempt_id),
+                    )
+                    task = cur.fetchone()
+                    if task is None:
+                        raise RuntimeError("登记待清理 Attempt 时未更新到预期 Task")
         return task
 
     @staticmethod
@@ -830,11 +848,31 @@ class TaskStore:
         error: dict[str, Any],
         *,
         expected_lease_version: int,
+        cleanup_pending: bool = False,
     ) -> dict[str, Any] | None:
-        """在有效租约下提交失败原因，或确认已经登记的取消请求。"""
+        """在有效租约下结束 Attempt。容器清理尚待确认时在同一事务保留名额。"""
         return self._finish_claimed_task(
-            task_id, attempt_id, expected_lease_version, status="failed", error=error
+            task_id, attempt_id, expected_lease_version, status="failed", error=error,
+            cleanup_pending=cleanup_pending,
         )
+
+    def try_confirm_task_cleanup(self, task_id: UUID, expected_attempt_id: UUID) -> UUID | None:
+        """调用方已确认此 Attempt 的容器停止且专属 cgroup 清空。首次确认返回 Task ID。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET cleanup_pending = FALSE, cleanup_attempt_id = NULL
+                    WHERE task_id = %s
+                      AND cleanup_pending IS TRUE
+                      AND cleanup_attempt_id = %s
+                    RETURNING task_id
+                    """,
+                    (task_id, expected_attempt_id),
+                )
+                row = cur.fetchone()
+        return row["task_id"] if row is not None else None
 
     def try_retry_task_with_attempt(
         self,
@@ -913,6 +951,8 @@ class TaskStore:
 
                 next_retry_at = task_row["next_retry_at"]
 
+                if task_row["cleanup_pending"]:
+                    return None
                 if next_retry_at is None or checked_at < next_retry_at:
                     return None
 
@@ -930,6 +970,7 @@ class TaskStore:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE t.task_id = %s
                       AND t.status = 'failed'
+                      AND NOT t.cleanup_pending
                       AND t.next_retry_at IS NOT NULL
                       AND t.next_retry_at <= %s
                     RETURNING t.*
@@ -1329,6 +1370,7 @@ class TaskStore:
                     SELECT lease_expires_at, max_attempts, retry_deadline_at
                     FROM tasks
                     WHERE task_id = %s AND status = 'running' AND lease_version = %s
+                      AND NOT cleanup_pending
                     FOR UPDATE
                     """,
                     (task_id, expected_lease_version),
