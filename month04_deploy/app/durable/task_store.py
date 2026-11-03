@@ -276,6 +276,36 @@ class TaskStore:
 
         return row
 
+    def request_task_cancel(self, task_id: UUID) -> dict[str, Any] | None:
+        """登记首次取消请求。等待执行的任务立即取消，正在执行的任务等 Worker 确认。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET cancel_requested_at = clock_timestamp(),
+                        status = CASE WHEN status = 'running' THEN status ELSE 'cancelled' END,
+                        updated_at = CASE WHEN status = 'running' THEN updated_at
+                                          ELSE clock_timestamp() END,
+                        next_retry_at = CASE WHEN status = 'running' THEN next_retry_at ELSE NULL END
+                    WHERE task_id = %s
+                      AND cancel_requested_at IS NULL
+                      AND (
+                          status IN ('queued', 'running')
+                          OR (status = 'failed' AND next_retry_at IS NOT NULL)
+                      )
+                    RETURNING *
+                    """,
+                    (task_id,),
+                )
+                task_row = cur.fetchone()
+                if task_row is None:
+                    # 重复请求或任务已结束时，返回数据库当前的状态和首次登记时间。
+                    cur.execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
+                    task_row = cur.fetchone()
+
+        return task_row
+
     def try_start_task(
         self,
         task_id: UUID,
