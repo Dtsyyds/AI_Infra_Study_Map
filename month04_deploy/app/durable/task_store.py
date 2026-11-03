@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 from datetime import datetime, timedelta
@@ -14,6 +15,18 @@ from .idempotency import (
 )
 
 from .retry_policy import RetryDecision, decide_retry
+
+
+class TaskQueueFullError(RuntimeError):
+    """创建新 Task 时没有剩余排队名额。"""
+
+
+@dataclass(frozen=True)
+class CancelledAtCheckpoint:
+    """本次没有写入步骤，事务已将 Task 和当前 Attempt 一起结束。"""
+
+    task: dict[str, Any]
+
 
 class TaskStore:
     def __init__(self, dsn: str):
@@ -203,6 +216,28 @@ class TaskStore:
 
         return call_row
 
+    @staticmethod
+    def _lock_queue_limit(cur) -> int:
+        """提交和领取共用同一条配置行锁，提交只读取排队上限。"""
+        cur.execute(
+            """
+            SELECT max_queued_tasks
+            FROM task_runtime_limits
+            WHERE singleton_id = 1
+            FOR UPDATE
+            """
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("缺少排队容量配置 singleton_id=1")
+        return row["max_queued_tasks"]
+
+    @staticmethod
+    def _require_queue_slot(cur, limit: int) -> None:
+        cur.execute("SELECT COUNT(*) AS queued_count FROM tasks WHERE status = 'queued'")
+        if cur.fetchone()["queued_count"] >= limit:
+            raise TaskQueueFullError("Task 等待队列已满")
+
     def create_task(
         self,
         task_type: str,
@@ -245,6 +280,8 @@ class TaskStore:
             # 三个参数依次为：
             # task_id、task_type、经过 Jsonb 包装的 payload。
             with conn.cursor() as cur:
+                limit = self._lock_queue_limit(cur)
+                self._require_queue_slot(cur, limit)
                 cur.execute(sql, (task_id, task_type, Jsonb(payload), retry_deadline_at, max_attempts))
                 row = cur.fetchone()
 
@@ -306,6 +343,32 @@ class TaskStore:
 
         return task_row
 
+    @staticmethod
+    def _lock_running_limit(cur) -> int:
+        cur.execute(
+            """
+            SELECT max_running_tasks
+            FROM task_runtime_limits
+            WHERE singleton_id = 1
+            FOR UPDATE
+            """
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("缺少执行容量配置 singleton_id=1")
+        return row["max_running_tasks"]
+
+    @staticmethod
+    def _has_running_slot(cur, limit: int) -> bool:
+        cur.execute(
+            """
+            SELECT COUNT(*) AS running_count
+            FROM tasks
+            WHERE status = 'running'
+            """
+        )
+        return cur.fetchone()["running_count"] < limit
+
     def try_start_task(
         self,
         task_id: UUID,
@@ -326,6 +389,9 @@ class TaskStore:
                 # 执行 sql，两个参数依次是：
                 # task_id、允许开始执行的当前状态。
                 # 用 fetchone() 将返回值赋给 row。
+                limit = self._lock_running_limit(cur)
+                if not self._has_running_slot(cur, limit):
+                    return None
                 cur.execute(sql, (task_id, "queued"))
                 row = cur.fetchone()
 
@@ -366,6 +432,7 @@ class TaskStore:
                     task is None
                     or task.get("lease_version", 0) != 0
                     or task.get("lease_expires_at") is not None
+                    or task.get("cancel_requested_at") is not None
                 ):
                     return None
                 if task["has_attempt_table"]:
@@ -490,51 +557,32 @@ class TaskStore:
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # TODO 1：
-                # 执行 insert_sql，参数依次为：
-                # uuid4()、task_type、Jsonb(payload)、
-                # idempotency_key、fingerprint。
-                # fetchone() 的结果赋给 row。
-                # raise NotImplementedError("完成 TODO 1")
-                cur.execute(
-                    insert_sql,
-                    (
-                        uuid4(),
-                        task_type,
-                        Jsonb(payload),
-                        idempotency_key,
-                        fingerprint,
-                        retry_deadline_at,
-                        max_attempts
-                    ),
-                )
+                limit = self._lock_queue_limit(cur)
+                # 等锁期间其他提交者可能已经创建了这个 key。
+                cur.execute(select_sql, (idempotency_key,))
                 row = cur.fetchone()
-
                 if row is None:
+                    self._require_queue_slot(cur, limit)
                     cur.execute(
-                        select_sql,
-                        (idempotency_key,),
+                        insert_sql,
+                        (
+                            uuid4(), task_type, Jsonb(payload), idempotency_key,
+                            fingerprint, retry_deadline_at, max_attempts,
+                        ),
                     )
                     row = cur.fetchone()
-
                     if row is None:
-                        raise RuntimeError(
-                            "幂等键发生冲突，但未查询到原任务"
-                        )
+                        cur.execute(select_sql, (idempotency_key,))
+                        row = cur.fetchone()
+                        if row is None:
+                            raise RuntimeError("幂等键发生冲突，但未查询到原任务")
 
-                    # TODO 2：
-                    # 比较 row["request_fingerprint"]
-                    # 与本次 fingerprint。
-                    # 不一致时抛出 IdempotencyConflictError。
-                    # 一致时继续执行，不修改原任务。
-                    if (
-                        row["request_fingerprint"] != fingerprint
-                        or row["retry_deadline_at"] != retry_deadline_at
-                        or row["max_attempts"] != max_attempts
-                    ):
-                        raise IdempotencyConflictError(
-                            "幂等键已存在，但请求内容不一致"
-                        )
+                if (
+                    row["request_fingerprint"] != fingerprint
+                    or row["retry_deadline_at"] != retry_deadline_at
+                    or row["max_attempts"] != max_attempts
+                ):
+                    raise IdempotencyConflictError("幂等键已存在，但请求内容不一致")
 
         # 必须退出连接上下文、提交成功后再返回。
         return row
@@ -577,6 +625,9 @@ class TaskStore:
                 # 同时更新 updated_at，使用 RETURNING *。
                 # fetchone() 的结果赋给 task_row。
                 # raise NotImplementedError("完成 TODO 1")
+                limit = self._lock_running_limit(cur)
+                if not self._has_running_slot(cur, limit):
+                    return None
                 cur.execute(
                     """
                     UPDATE tasks
@@ -630,19 +681,18 @@ class TaskStore:
         *,
         expected_lease_version: int,
     ) -> dict[str, Any] | None:
-        """在有效租约下同时提交 Task 和 Attempt 的成功结果。"""
+        """在有效租约下提交成功结果，或确认已经登记的取消请求。"""
         return self._finish_claimed_task(
             task_id, attempt_id, expected_lease_version, status="succeeded", result=result
         )
 
-    @staticmethod
-    def _lock_live_claim(
-        cur, task_id: UUID, attempt_id: UUID, expected_lease_version: int,
-    ) -> datetime | None:
-        """先锁 Task，再锁对应的 running Attempt，返回有效租约的检查时间。"""
+    def _check_claim_at_boundary(
+        self, cur, task_id: UUID, attempt_id: UUID, expected_lease_version: int,
+    ) -> tuple[dict[str, Any], datetime] | None:
+        """在同一事务中锁定领取记录、核对时间，并确认等待中的取消。"""
         cur.execute(
             """
-            SELECT lease_expires_at FROM tasks
+            SELECT * FROM tasks
             WHERE task_id = %s AND status = 'running' AND lease_version = %s
             FOR UPDATE
             """,
@@ -668,7 +718,24 @@ class TaskStore:
         checked_at = cur.fetchone()["checked_at"]
         if checked_at >= task["lease_expires_at"]:
             return None
-        return checked_at
+        # 早期迁移的 schema 里还没有取消请求字段。
+        if task.get("cancel_requested_at") is not None:
+            task = self._write_terminal(
+                cur, task_id, attempt_id, expected_lease_version, checked_at,
+                status="cancelled",
+            )
+        return task, checked_at
+
+    def check_claim_before_step(
+        self, task_id: UUID, attempt_id: UUID, *, expected_lease_version: int,
+    ) -> dict[str, Any] | None:
+        """返回可继续的 running Task、确认后的 cancelled Task，或失去租约时的 None。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                claim = self._check_claim_at_boundary(
+                    cur, task_id, attempt_id, expected_lease_version
+                )
+        return None if claim is None else claim[0]
 
     def _finish_claimed_task(
         self,
@@ -682,44 +749,57 @@ class TaskStore:
     ) -> dict[str, Any] | None:
         with self._connect() as conn:
             with conn.cursor() as cur:
-                checked_at = self._lock_live_claim(
+                claim = self._check_claim_at_boundary(
                     cur, task_id, attempt_id, expected_lease_version
                 )
-                if checked_at is None:
+                if claim is None:
                     return None
+                task, checked_at = claim
+                if task["status"] == "running":
+                    task = self._write_terminal(
+                        cur, task_id, attempt_id, expected_lease_version, checked_at,
+                        status=status, result=result, error=error,
+                    )
+        return task
 
-                error_param = Jsonb(error) if error is not None else None
-                cur.execute(
-                    """
-                    UPDATE tasks
-                    SET status = %s, result = %s, error = %s,
-                        lease_expires_at = NULL, updated_at = %s
-                    WHERE task_id = %s AND status = 'running' AND lease_version = %s
-                    RETURNING *
-                    """,
-                    (
-                        status, Jsonb(result) if result is not None else None, error_param,
-                        checked_at, task_id, expected_lease_version,
-                    ),
-                )
-                task = cur.fetchone()
-                if task is None:
-                    if status == "succeeded":
-                        raise RuntimeError("completion rejected: Task update returned no row")
-                    raise RuntimeError("failure recording rejected: Task update returned no row")
+    @staticmethod
+    def _write_terminal(
+        cur, task_id: UUID, attempt_id: UUID, expected_lease_version: int, checked_at: datetime,
+        *, status: str, result: dict[str, Any] | None = None, error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """调用方已经锁住 Task 和对应的 Attempt。两张表必须一起更新成功。"""
+        cancelled = status == "cancelled"
+        error_param = Jsonb(error) if error is not None else None
+        cur.execute(
+            """
+            UPDATE tasks
+            SET status = %s, result = %s, error = %s, lease_expires_at = NULL,
+                next_retry_at = CASE WHEN %s THEN NULL ELSE next_retry_at END,
+                updated_at = %s
+            WHERE task_id = %s AND status = 'running' AND lease_version = %s
+            RETURNING *
+            """,
+            (
+                status, Jsonb(result) if result is not None else None, error_param,
+                cancelled, checked_at, task_id, expected_lease_version,
+            ),
+        )
+        task = cur.fetchone()
+        if task is None:
+            action = {"succeeded": "completion", "failed": "failure recording", "cancelled": "cancellation"}
+            raise RuntimeError(f"{action[status]} rejected: Task update returned no row")
 
-                cur.execute(
-                    """
-                    UPDATE task_attempts
-                    SET status = %s, error = %s, finished_at = %s
-                    WHERE task_id = %s AND attempt_id = %s AND status = 'running'
-                    RETURNING attempt_id
-                    """,
-                    (status, error_param, checked_at, task_id, attempt_id),
-                )
-                if cur.fetchone() is None:
-                    raise RuntimeError("尝试更新 Attempt 后没有返回记录")
-
+        cur.execute(
+            """
+            UPDATE task_attempts
+            SET status = %s, error = %s, finished_at = %s
+            WHERE task_id = %s AND attempt_id = %s AND status = 'running'
+            RETURNING attempt_id
+            """,
+            ("interrupted" if cancelled else status, error_param, checked_at, task_id, attempt_id),
+        )
+        if cur.fetchone() is None:
+            raise RuntimeError("尝试更新 Attempt 后没有返回记录")
         return task
 
     def get_running_attempt(
@@ -751,7 +831,7 @@ class TaskStore:
         *,
         expected_lease_version: int,
     ) -> dict[str, Any] | None:
-        """在有效租约下同时提交 Task 和 Attempt 的失败原因。"""
+        """在有效租约下提交失败原因，或确认已经登记的取消请求。"""
         return self._finish_claimed_task(
             task_id, attempt_id, expected_lease_version, status="failed", error=error
         )
@@ -768,6 +848,7 @@ class TaskStore:
         """重试领取的练习骨架，尚未完成。"""
         with self._connect() as conn:
             with conn.cursor() as cur:
+                limit = self._lock_running_limit(cur)
                 cur.execute(
                     """
                     SELECT * FROM tasks
@@ -833,6 +914,9 @@ class TaskStore:
                 next_retry_at = task_row["next_retry_at"]
 
                 if next_retry_at is None or checked_at < next_retry_at:
+                    return None
+
+                if not self._has_running_slot(cur, limit):
                     return None
 
                 task_sql = """
@@ -1341,14 +1425,18 @@ class TaskStore:
         *,
         expected_lease_version: int,
         expected_attempt_id: UUID,
-    ) -> dict[str, Any] | None:
-        """仅当 Worker 仍持有有效租约且 Attempt 正在运行时保存步骤。"""
+    ) -> dict[str, Any] | CancelledAtCheckpoint | None:
+        """返回保存的步骤、已确认的取消，或在失去领取资格时返回 None。"""
         with self._connect() as conn:
             with conn.cursor() as cur:
-                if self._lock_live_claim(
+                claim = self._check_claim_at_boundary(
                     cur, task_id, expected_attempt_id, expected_lease_version
-                ) is None:
+                )
+                if claim is None:
                     return None
+                task, _ = claim
+                if task["status"] == "cancelled":
+                    return CancelledAtCheckpoint(task)
 
                 cur.execute(
                     """

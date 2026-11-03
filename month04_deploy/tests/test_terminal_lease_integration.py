@@ -15,11 +15,14 @@ from month04_deploy.tests.test_task_lease_takeover_integration import (
     first_claim as first_claim,
     set_lease_remaining,
 )
+from month04_deploy.tests.test_task_lease_takeover_race_integration import (
+    wait_for_both_workers,
+)
 from month04_deploy.tests.test_task_retry_integration import (
     deadline_for_creation,
     wait_for_task_row_block,
 )
-from month04_deploy.tests.test_worker_attempts_integration import read_snapshot, store as store
+from month04_deploy.tests.test_worker_attempts_integration import read_snapshot, store as store, run_worker
 
 
 pytestmark = pytest.mark.skipif(
@@ -219,3 +222,122 @@ def test_task_only_success_cannot_bypass_a_claim(store, first_claim):
     assert store.try_start_task(legacy_id) is not None
     completed = store.try_succeed_task(legacy_id, {"answer": "legacy"})
     assert completed is not None and completed["status"] == "succeeded"
+
+def test_take_over_task_once_keeps_checkpoint(store, first_claim, monkeypatch):
+    first_task, first_attempt = first_claim
+    task_id = first_task["task_id"]
+    version = first_task["lease_version"]
+
+    set_lease_remaining(store, first_task, timedelta(hours=1))
+    step_zero = store.try_save_completed_step(
+        task_id, 0, worker.STEPS[0][0], first_task["payload"],
+        expected_lease_version=version,
+        expected_attempt_id=first_attempt["attempt_id"],
+    )
+    assert isinstance(step_zero, dict)
+    before = read_snapshot(store, task_id)
+
+    def reject_lookup(*args, **kwargs):
+        pytest.fail("接管后应使用自己领到的 Task 和 Attempt")
+
+    monkeypatch.setattr(store, "get_task", reject_lookup)
+    monkeypatch.setattr(store, "get_running_attempt", reject_lookup)
+
+    # A 的租约仍有效，B 的接管请求应当无副作用。
+    assert worker.take_over_task_once(store, task_id, expected_lease_version=version) is None
+    assert read_snapshot(store, task_id) == before
+
+    # 让 A 的租约到期，B 应从第 1 步继续。
+    set_lease_remaining(store, first_task, timedelta(seconds=-1))
+    finished = worker.take_over_task_once(store, task_id, expected_lease_version=version)
+
+    task, attempts, steps = read_snapshot(store, task_id)
+    assert finished == task and task["status"] == "succeeded"
+    assert task["lease_version"] == version + 1
+    assert task["result"] == {"answer": "echo:takeover"}
+    assert [(a["attempt_no"], a["status"]) for a in attempts] == [
+        (1, "interrupted"), (2, "succeeded")
+    ]
+    assert [s["step_index"] for s in steps] == [0, 1, 2]
+    assert steps[0] == step_zero
+
+def test_cli_takeover_after_successor_crash(store, first_claim):
+    task_a, _ = first_claim
+    task_id = task_a["task_id"]
+    version_a = task_a["lease_version"]
+    set_lease_remaining(store, task_a, timedelta(seconds=-1))
+
+    b = run_worker(
+        store, task_id, "--take-over-version", str(version_a), "--crash-after-step", "0"
+    )
+    assert b.returncode == 86, b.stdout + b.stderr
+    task_b, attempts_b, prefix = read_snapshot(store, task_id)
+    assert (task_b["lease_version"], task_b["status"]) == (version_a + 1, "running")
+    assert [a["status"] for a in attempts_b] == ["interrupted", "running"]
+    assert [s["step_index"] for s in prefix] == [0]
+
+    set_lease_remaining(store, task_b, timedelta(seconds=-1))
+    before = read_snapshot(store, task_id)
+    stale = run_worker(store, task_id, "--take-over-version", str(version_a))
+    assert stale.returncode == 2 and "NOT_ELIGIBLE" in stale.stdout, stale.stdout + stale.stderr
+    assert read_snapshot(store, task_id) == before
+
+    c = run_worker(store, task_id, "--take-over-version", str(task_b["lease_version"]))
+    assert c.returncode == 0, c.stdout + c.stderr
+    assert "RESTORED next_step=1" in c.stdout
+
+    task, attempts, steps = read_snapshot(store, task_id)
+    assert (task["status"], task["lease_version"], task["result"]) == (
+        "succeeded", version_a + 2, {"answer": "echo:takeover"},
+    )
+    assert [a["status"] for a in attempts] == ["interrupted", "interrupted", "succeeded"]
+    assert [s["step_index"] for s in steps] == [0, 1, 2]
+    assert steps[:1] == prefix
+
+def test_two_cli_workers_compete_for_one_expired_lease(store, first_claim):
+    task_a, attempt_a = first_claim
+    task_id = task_a["task_id"]
+    version = task_a["lease_version"]
+    set_lease_remaining(store, task_a, timedelta(seconds=-1))
+
+    tag = f"cli_takeover_{task_id.hex}"
+    options = conninfo_to_dict(store.dsn).get("options", "")
+    cli_store = TaskStore(make_conninfo(
+        store.dsn,
+        application_name=tag,
+        options=f"{options} -c lock_timeout=20s -c statement_timeout=30s",
+    ))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with psycopg.connect(store.dsn, connect_timeout=5) as holder:
+            locked = holder.execute(
+                "SELECT task_id FROM tasks WHERE task_id = %s FOR UPDATE",
+                (task_id,),
+            ).fetchone()
+            assert locked == (task_id,)
+
+            futures = [
+                pool.submit(run_worker, cli_store, task_id, "--take-over-version", str(version))
+                for _ in range(2)
+            ]
+            wait_for_both_workers(store.dsn, tag, holder.info.backend_pid, futures)
+
+        # 到这里 holder 已经释放行锁，两个子进程才能完成接管判断。
+        results = [future.result(timeout=30) for future in futures]
+
+    winner, loser = sorted(results, key=lambda p: p.returncode)
+    assert (winner.returncode, loser.returncode) == (0, 2), [
+        (p.returncode, p.stdout, p.stderr) for p in results
+    ]
+    assert "SUCCEEDED" in winner.stdout
+    assert "NOT_ELIGIBLE:" in loser.stdout and "STEP_SAVED" not in loser.stdout
+
+    task, attempts, steps = read_snapshot(store, task_id)
+    assert (task["status"], task["lease_version"], task["result"]) == (
+        "succeeded", version + 1, {"answer": "echo:takeover"},
+    )
+    assert attempts[0]["attempt_id"] == attempt_a["attempt_id"]
+    assert [(a["attempt_no"], a["status"]) for a in attempts] == [
+        (1, "interrupted"), (2, "succeeded"),
+    ]
+    assert [s["step_index"] for s in steps] == [0, 1, 2]

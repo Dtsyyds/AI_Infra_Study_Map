@@ -41,6 +41,7 @@ def test_resume_skips_saved_steps(completed_count):
     final_result = {"answer": "echo:crash lesson"}
 
     store.get_task.return_value = task
+    store.check_claim_before_step.return_value = task
     store.try_save_completed_step.return_value = {"task_id": task_id}
     store.get_running_attempt.return_value = {
         "attempt_id": attempt_id,

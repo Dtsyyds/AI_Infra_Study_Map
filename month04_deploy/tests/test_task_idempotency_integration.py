@@ -5,12 +5,12 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
 
 from month04_deploy.app.durable.idempotency import (
     IdempotencyConflictError,
 )
 from month04_deploy.app.durable.task_store import TaskStore
+from month04_deploy.tests.test_task_idempotency_budget_integration import store as store
 
 
 pytestmark = pytest.mark.skipif(
@@ -20,15 +20,8 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def dsn():
-    value = os.getenv("AGENT_DATABASE_URL")
-    assert value, "已启用数据库测试，但缺少 AGENT_DATABASE_URL"
-
-    # 只给测试连接设置 SQL 超时，防止异常锁等待长期卡住。
-    return make_conninfo(
-        value,
-        options="-c statement_timeout=10000",
-    )
+def dsn(store):
+    return store.dsn
 
 
 def count_tasks_for_key(dsn, key):
@@ -122,8 +115,8 @@ def test_same_key_different_payload_concurrently(dsn):
     assert count_tasks_for_key(dsn, key) == 1
 
 
-def test_replay_preserves_succeeded_task(dsn):
-    store = TaskStore(dsn)
+def test_replay_preserves_succeeded_task(store):
+    dsn = store.dsn
     key = f"test-finished-{uuid4().hex}"
     payload = {"text": "already finished"}
 

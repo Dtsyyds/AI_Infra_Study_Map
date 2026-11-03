@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -6,7 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .idempotency import IdempotencyConflictError
-from .task_store import TaskStore
+from .task_store import TaskQueueFullError, TaskStore
 
 
 TaskStatusValue = Literal[
@@ -46,6 +47,7 @@ class TaskView(BaseModel):
     status: TaskStatusValue
     result: Any = None
     error: Any = None
+    cancel_requested_at: datetime | None = None
 
 
 def create_task_router(
@@ -73,6 +75,8 @@ def create_task_router(
                 "model": TaskAccepted,
                 "description": "返回已经结束的已有任务",
             },
+            409: {"description": "同一个幂等键对应不同请求"},
+            503: {"description": "等待队列已满或持久化服务不可用"},
         },
     )
     def submit_task(
@@ -120,6 +124,9 @@ def create_task_router(
                 detail="idempotency_conflict",
             ) from exc
 
+        except TaskQueueFullError as exc:
+            raise HTTPException(status_code=503, detail="task_queue_full") from exc
+
         except psycopg.OperationalError as exc:
             raise HTTPException(
                 status_code=503,
@@ -143,6 +150,31 @@ def create_task_router(
             result=row.get("result"),
             error=row.get("error"),
         )
+
+    @router.post(
+        "/{task_id}/cancel",
+        status_code=200,
+        response_model=TaskView,
+        responses={202: {"model": TaskView, "description": "取消已登记，等待 Worker 确认"}},
+    )
+    def cancel_task(task_id: UUID, response: Response) -> TaskView:
+        task_store = require_store()
+        try:
+            row = task_store.request_task_cancel(task_id=task_id)
+        except psycopg.OperationalError as exc:
+            raise HTTPException(status_code=503, detail="database_operation_failed") from exc
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="task_not_found")
+        task = TaskView.model_validate(row)
+        if task.status == "running" and task.cancel_requested_at is not None:
+            response.status_code = 202
+        elif task.status not in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=500, detail="invalid_cancel_state")
+
+        response.headers["Location"] = f"/v1/tasks/{task.task_id}"
+        return task
+
     @router.get("/{task_id}", response_model=TaskView)
     def query_task(task_id: UUID) -> TaskView:
         task_store = require_store()

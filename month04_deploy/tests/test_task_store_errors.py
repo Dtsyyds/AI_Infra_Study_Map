@@ -16,11 +16,12 @@ def test_create_task_propagates_commit_error(monkeypatch):
 
     cursor = conn.cursor.return_value.__enter__.return_value
 
-    # INSERT RETURNING 已经返回非空记录。
-    cursor.fetchone.return_value = {
-        "task_id": uuid4(),
-        "status": "queued",
-    }
+    # 锁定配置、检查排队名额、插入 Task 均成功，只有最后的提交失败。
+    cursor.fetchone.side_effect = [
+        {"max_queued_tasks": 32},
+        {"queued_count": 0},
+        {"task_id": uuid4(), "status": "queued"},
+    ]
 
     # 但退出连接上下文时，模拟提交阶段发生异常。
     conn.__exit__.side_effect = psycopg.OperationalError(
@@ -39,5 +40,5 @@ def test_create_task_propagates_commit_error(monkeypatch):
             payload={"text": "test"},
         )
 
-    cursor.fetchone.assert_called_once()
+    assert cursor.fetchone.call_count == 3
     conn.__exit__.assert_called_once_with(None, None, None)

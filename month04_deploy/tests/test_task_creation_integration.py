@@ -105,7 +105,12 @@ def store(database_before_max_attempts):
     )
 
     with psycopg.connect(dsn, connect_timeout=5) as conn:
-        for migration in (max_attempts_migration, next_retry_migration):
+        for migration in (
+            max_attempts_migration,
+            next_retry_migration,
+            max_attempts_migration.with_name("012_create_task_runtime_limits.sql"),
+            max_attempts_migration.with_name("013_add_task_queue_limit.sql"),
+        ):
             conn.execute(
                 migration.read_text(encoding="utf-8"),
                 prepare=False,

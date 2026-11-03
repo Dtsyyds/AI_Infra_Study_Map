@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any
 from uuid import UUID
 from datetime import datetime
-from .task_store import TaskStore
+from .task_store import CancelledAtCheckpoint, TaskStore
 from .retry_policy import RetryDecision
 
 
@@ -299,6 +299,11 @@ def _execute_claimed_task(
     expected_lease_version = task["lease_version"]
     expected_attempt_id = attempt["attempt_id"]
 
+    def check_boundary() -> dict[str, Any] | None:
+        return store.check_claim_before_step(
+            task_id, expected_attempt_id, expected_lease_version=expected_lease_version
+        )
+
     # TODO 1：
     # 将原 run_task_once 中，从 task_type 校验开始，
     # 到最后 return finished 为止的执行代码移到这里。
@@ -309,6 +314,9 @@ def _execute_claimed_task(
     # True：读取步骤并调用 restore_progress()。
     # False：next_step = 0，state = task["payload"]。
     if restore_from_steps:
+        current = check_boundary()
+        if current is None or current["status"] == "cancelled":
+            return current
         completed_steps = store.get_completed_steps(task_id)
 
         # TODO 1：
@@ -338,7 +346,9 @@ def _execute_claimed_task(
         remaining_steps,
         start=next_step,
     ):
-        # state = operation(state)
+        current = check_boundary()
+        if current is None or current["status"] == "cancelled":
+            return current
         try:
             state = operation(state)
         except ValueError as exc:
@@ -354,6 +364,8 @@ def _execute_claimed_task(
             )
             if failed is None:
                 return None
+            if failed["status"] == "cancelled":
+                return failed
             raise
 
 
@@ -367,6 +379,8 @@ def _execute_claimed_task(
         )
         if saved_step is None:
             return None
+        if isinstance(saved_step, CancelledAtCheckpoint):
+            return saved_step.task
 
         print(
             f"STEP_SAVED index={step_index} name={step_name}",
@@ -446,14 +460,40 @@ def retry_task_once(
         crash_after_step=crash_after_step,
     )
 
+def take_over_task_once(
+    store: TaskStore,
+    task_id: UUID,
+    *,
+    expected_lease_version: int,
+    crash_after_step: int | None = None,
+) -> dict[str, Any] | None:
+    """接管过期租约，并从已提交的检查点继续执行。"""
+    if crash_after_step is not None and crash_after_step not in range(len(STEPS)):
+        raise ValueError("crash_after_step 超出步骤范围")
+    claimed = store.try_take_over_expired_task(
+        task_id, expected_lease_version=expected_lease_version
+    )
+    if claimed is None:
+        return None
+
+    task, attempt = claimed
+    return _execute_claimed_task(store, task, attempt, restore_from_steps=True, crash_after_step=crash_after_step)
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="执行一个已持久化的 demo.echo 任务"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--resume",
         action="store_true",
-        help="人工恢复 running 任务；要求旧 Worker 已退出且无并发执行",
+        help="人工恢复 running 任务，要求旧 Worker 已退出且无并发执行",
+    )
+    mode.add_argument(
+        "--take-over-version",
+        type=int,
+        metavar="VERSION",
+        help="用观察到的租约版本尝试接管过期任务",
     )
     parser.add_argument(
         "--crash-after-step",
@@ -468,6 +508,8 @@ def main() -> int:
         type=UUID,
     )
     args = parser.parse_args()
+    if args.take_over_version is not None and args.take_over_version < 0:
+        parser.error("--take-over-version 不能小于 0")
 
     dsn = os.environ.get("AGENT_DATABASE_URL")
     if not dsn:
@@ -480,7 +522,12 @@ def main() -> int:
         flush=True,
     )
 
-    finished = run_task_once(store, args.task_id, crash_after_step=args.crash_after_step, resume=args.resume)
+    if args.take_over_version is not None:
+        finished = take_over_task_once(
+            store, args.task_id, expected_lease_version=args.take_over_version, crash_after_step=args.crash_after_step
+        )
+    else:
+        finished = run_task_once(store, args.task_id, crash_after_step=args.crash_after_step, resume=args.resume)
 
     if finished is None:
         print(
@@ -488,6 +535,10 @@ def main() -> int:
             flush=True,
         )
         return 2
+
+    if finished["status"] == "cancelled":
+        print("CANCELLED", flush=True)
+        return 0
 
     print(
         f"SUCCEEDED result={finished['result']}",

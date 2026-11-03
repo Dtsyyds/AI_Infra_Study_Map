@@ -62,6 +62,8 @@ def store(request):
     if getattr(request, "param", None) != "before_009":
         migrations.append(STATUS_MIGRATION)
         migrations.append(MIGRATIONS_DIR / "010_add_task_lease.sql")
+        migrations.append(MIGRATIONS_DIR / "012_create_task_runtime_limits.sql")
+        migrations.append(MIGRATIONS_DIR / "013_add_task_queue_limit.sql")
     for migration in migrations:
         assert migration.is_file(), f"缺少迁移文件：{migration}"
 

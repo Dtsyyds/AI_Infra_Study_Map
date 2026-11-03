@@ -29,6 +29,7 @@ def worker_case():
         "status": "running",
     }
     store.try_start_task_with_attempt.return_value = (task, attempt)
+    store.check_claim_before_step.return_value = task
     store.try_save_completed_step.return_value = {"task_id": task_id}
     store.try_succeed_task_with_attempt.return_value = {
         **task,
@@ -90,8 +91,11 @@ def test_worker_completes_three_steps(worker_case):
     # 验证认领、保存步骤、最终完成的调用顺序。
     assert [item[0] for item in store.mock_calls] == [
         "try_start_task_with_attempt",
+        "check_claim_before_step",
         "try_save_completed_step",
+        "check_claim_before_step",
         "try_save_completed_step",
+        "check_claim_before_step",
         "try_save_completed_step",
         "try_succeed_task_with_attempt",
     ]
